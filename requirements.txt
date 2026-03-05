@@ -1,0 +1,33 @@
+# Project Core Dependencies
+# Production pipeline requirements
+
+# PDF Processing and Document Conversion
+docling>=2.58.0,<3.0.0          # PDF parsing, document conversion, and chunking
+docling-core>=2.49.0,<3.0.0     # Core docling types (PictureItem, TableItem)
+
+# Text Embeddings and Vector Search
+sentence-transformers>=2.0.0    # Text embeddings (SentenceTransformer)
+faiss-cpu>=1.7.0                # Vector similarity search (CPU version)
+                                # Use 'faiss-gpu' instead if GPU is available
+
+# Data Processing
+pandas>=2.0.0                   # CSV handling and data manipulation
+numpy>=1.24.0,<2.0.0            # Numerical operations (dependency of many packages)
+
+# HTTP and API
+requests>=2.28.0                # HTTP requests for PDF downloads
+google-cloud-aiplatform>=1.50.0 # Google Cloud Vertex AI (for Gemini models)
+google-generativeai>=0.8.0      # Google Generative AI SDK (for Gemini alt-text generation)
+
+# Image Processing
+Pillow>=10.0.0                  # Image processing (PIL)
+
+# Utilities
+tqdm>=4.65.0                    # Progress bars
+
+# Optional Dependencies (for experimental chunkers)
+
+# Uncomment if using chunker_experimental.py:
+# langchain-experimental>=0.3.0 # SemanticChunker for embedding-aware text splitting
+# langchain-huggingface>=0.1.0  # HuggingFace embeddings integration for LangChain
+# llama-parse>=0.4.0            # LlamaParse PDF-to-text extraction
