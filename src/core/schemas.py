@@ -1,9 +1,21 @@
 from __future__ import annotations
 
+import re
+from datetime import datetime
 from enum import Enum
 from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
+
+CHUNK_ID_RE = re.compile(r"^[A-Za-z0-9._-]+(?:_(?:img|fig|tab))?_[0-9a-f]{8}$")
+
+
+def _validate_iso8601(value: str) -> str:
+    try:
+        datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("must be a valid ISO 8601 timestamp") from exc
+    return value
 
 
 class ChunkType(str, Enum):
@@ -29,6 +41,15 @@ class TextChunk(BaseModel):
         if not text:
             raise ValueError("text must be non-empty and not whitespace-only")
         return text
+
+    @field_validator("chunk_id")
+    @classmethod
+    def validate_chunk_id(cls, value: str) -> str:
+        if not CHUNK_ID_RE.match(value):
+            raise ValueError(
+                "chunk_id must match '{doc_id}_{8hex}' or legacy '{doc_id}_{img|fig|tab}_{8hex}'"
+            )
+        return value
 
 
 class TableChunk(TextChunk):
@@ -64,6 +85,13 @@ class EmbeddingRecord(BaseModel):
             raise ValueError("text must be non-empty and not whitespace-only")
         return text
 
+    @field_validator("created_at")
+    @classmethod
+    def validate_created_at(cls, value: str) -> str:
+        if not value:
+            return value
+        return _validate_iso8601(value)
+
 
 class ManifestEntry(BaseModel):
     content_hash: str
@@ -77,6 +105,11 @@ class ManifestEntry(BaseModel):
     status: str
     error_message: str = ""
 
+    @field_validator("parsed_at", "embedded_at")
+    @classmethod
+    def validate_manifest_timestamps(cls, value: str) -> str:
+        return _validate_iso8601(value)
+
 
 class Citation(BaseModel):
     ref_id: str
@@ -87,7 +120,7 @@ class Citation(BaseModel):
 
 class VerificationResult(BaseModel):
     passed: bool
-    confidence: float
+    confidence: float = Field(ge=0.0, le=1.0)
     warnings: list[str]
     corrected_output: dict | None = None
 
@@ -125,3 +158,8 @@ class BenchmarkReport(BaseModel):
     mean_retrieval_latency_ms: float
     p95_retrieval_latency_ms: float
     per_question: list[dict] = Field(default_factory=list)
+
+    @field_validator("timestamp")
+    @classmethod
+    def validate_timestamp(cls, value: str) -> str:
+        return _validate_iso8601(value)

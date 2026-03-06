@@ -4,9 +4,6 @@ import json
 import uuid
 from pathlib import Path
 
-from docling.chunking import HybridChunker
-from docling.document_converter import DocumentConverter
-
 from src.config.settings import get_settings
 from src.core.logging import get_logger
 from src.core.paths import find_project_root
@@ -18,39 +15,33 @@ logger = get_logger(__name__)
 def extract_pdf_chunks(pdf_path: str | Path) -> list[TextChunk]:
     pdf_path = Path(pdf_path)
     settings = get_settings()
+    from docling_core.transforms.chunker import HierarchicalChunker
+    from docling.document_converter import DocumentConverter
 
     converter = DocumentConverter()
     result = converter.convert(pdf_path)
     document = result.document
 
-    chunker = HybridChunker(
-        tokenizer=settings.embedding_model,
-        chunk_size=settings.chunk_size,
-        overlap=settings.chunk_overlap,
-    )
+    chunker = HierarchicalChunker(min_chunk_len=max(1, settings.chunk_overlap))
 
     chunks: list[TextChunk] = []
     doc_id = pdf_path.stem
     for chunk in chunker.chunk(document):
-        exported = chunk.export_json_dict()
-        text = str(exported.get("text") or "").strip()
+        text = str(getattr(chunk, "text", "")).strip()
         if not text:
             continue
 
-        meta = exported.get("meta") or {}
-        headings = meta.get("headings") or []
-        page_number = None
-        try:
-            page_number = meta.get("doc_items", [])[0].get("prov", [])[0].get("page_no")
-        except Exception:
-            page_number = None
+        heading = getattr(chunk, "heading", None)
+        headings = [str(heading)] if heading else []
+        section_path = [seg for seg in str(getattr(chunk, "path", "")).split("/") if seg]
 
         chunks.append(
             TextChunk(
                 chunk_id=f"{doc_id}_{uuid.uuid4().hex[:8]}",
                 doc_id=doc_id,
                 text=text,
-                page_number=page_number,
+                page_number=None,
+                section_path=section_path,
                 headings=[str(h) for h in headings if h],
                 source_file=pdf_path.name,
             )

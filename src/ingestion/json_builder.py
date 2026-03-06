@@ -1,83 +1,61 @@
-from pathlib import Path
+from __future__ import annotations
+
 import json
-import uuid
-from .load_files import load_metadata_df, get_PDF_paths
-from .chunker import extract_pdf_chunks
+from pathlib import Path
+
 from src.core.logging import get_logger
 from src.core.paths import find_project_root
+from src.ingestion.chunker import extract_pdf_chunks
+from src.ingestion.load_files import get_PDF_paths, load_metadata_df
 
 logger = get_logger(__name__)
 
-def access_json():
-    """Locate and load the JSON file if it exists, otherwise return an empty dict."""
-    path = find_project_root()
 
-    JSON_dir = path / "data" / "JSON"
-    JSON_dir.mkdir(parents=True, exist_ok=True)
-    JSON_file = JSON_dir / "chunks.json"
-
-    if JSON_file.exists():
-        logger.info(f"{JSON_file.name} exists. Loading...")
-        with open(JSON_file, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        logger.info("JSON loaded successfully!")
-        return data, JSON_file
-    else:
-        logger.info(f"{JSON_file.name} does not exist, creating new one...")
-        return {}, JSON_file
+def canonical_chunks_path() -> Path:
+    root = find_project_root()
+    json_dir = root / "data" / "JSON"
+    json_dir.mkdir(parents=True, exist_ok=True)
+    return json_dir / "chunks.jsonl"
 
 
-def save_json_safely(data, path):
-    """Write JSON atomically (safe even if interrupted mid-write)."""
+def write_chunks_jsonl(chunks: list[dict], path: Path) -> None:
     tmp_path = path.with_suffix(".tmp")
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=4)
-    tmp_path.replace(path)  # replaces old file atomically
+    with tmp_path.open("w", encoding="utf-8") as handle:
+        for chunk in chunks:
+            handle.write(json.dumps(chunk, ensure_ascii=False) + "\n")
+    tmp_path.replace(path)
 
 
-def build_json():
+def build_jsonl() -> Path:
     df_meta = load_metadata_df()
     pdf_dict = get_PDF_paths()
-    chunks_json, JSON_file = access_json()
 
+    all_chunks: list[dict] = []
     for pdf_id in df_meta["id"]:
         pdf_path = pdf_dict.get(pdf_id)
         if not pdf_path:
-            logger.info(f"Metadata ID {pdf_id} not found in downloaded PDFs, skipping...")
+            logger.warning("pdf_not_found_for_metadata", pdf_id=pdf_id)
             continue
-
-        if pdf_id in chunks_json:
-            logger.info(f"ID {pdf_id} already in JSON, skipping...")
-            continue
-
-        logger.info(f"\n📄 Extracting chunks for {pdf_id}...")
 
         try:
-            chunks_list = extract_pdf_chunks(pdf_path)
-        except Exception as e:
-            logger.info(f"⚠️ Error extracting {pdf_id}: {e}")
+            chunks = extract_pdf_chunks(pdf_path)
+        except Exception as exc:
+            logger.warning("extract_chunks_failed", pdf_id=pdf_id, error=str(exc))
             continue
 
-        pdf_chunks = []
-        for chunk in chunks_list:
-            chunk_dict = chunk.export_json_dict()
-            chunk_entry = {
-                "chunk_id": f"{pdf_id}_{uuid.uuid4().hex[:8]}",  # unique
-                "text": chunk_dict["text"],
-                "headings": chunk_dict["meta"].get("headings", []),
-                "page_number": chunk_dict["meta"]["doc_items"][0]["prov"][0]["page_no"],
-                "source_file": chunk_dict["meta"]["origin"]["filename"]
-            }
-            pdf_chunks.append(chunk_entry)
+        all_chunks.extend(chunk.model_dump() for chunk in chunks)
+        logger.info("chunks_extracted", pdf_id=pdf_id, num_chunks=len(chunks))
 
-        chunks_json[pdf_id] = pdf_chunks
+    out_path = canonical_chunks_path()
+    write_chunks_jsonl(all_chunks, out_path)
+    logger.info("chunks_jsonl_built", path=str(out_path), total_chunks=len(all_chunks))
+    return out_path
 
-        # 💾 Save progress immediately after each PDF
-        save_json_safely(chunks_json, JSON_file)
-        logger.info(f"✅ Saved progress after {pdf_id}")
 
-    logger.info(f"\n🎉 All available PDFs processed. Final JSON at: {JSON_file}")
+def build_json() -> Path:
+    """Backwards-compatible alias; canonical output remains chunks.jsonl."""
+    return build_jsonl()
 
 
 if __name__ == "__main__":
-    build_json()
+    build_jsonl()
