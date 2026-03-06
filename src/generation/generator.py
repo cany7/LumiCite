@@ -6,12 +6,12 @@ import os
 import re
 from typing import Any, Dict, Optional
 import warnings
+from src.core.constants import FALLBACK_ANSWER
+from src.core.logging import get_logger, timed
 
 # Suppress a specific warning from the Vertex AI SDK
 warnings.filterwarnings("ignore", category=UserWarning, module="google.cloud.aiplatform.initializer")
-
-FALLBACK_ANSWER = "Unable to answer with confidence based on the provided documents."
-
+logger = get_logger(__name__)
 
 def _strip_md_fences(text: str) -> str:
     """Remove markdown fences if present."""
@@ -101,11 +101,12 @@ class LLMGenerator:
             # The SDK will automatically find the credentials from the environment variable.
             vertexai.init(project=self.project, location=self.location)
             self._client = GenerativeModel(self.model_name)
-            print("Vertex AI client initialized successfully.")
+            logger.info("Vertex AI client initialized successfully.")
         except Exception as e:
             warnings.warn(f"Error initializing Vertex AI client: {e}")
             self._client = None
 
+    @timed("generate")
     def generate_json(self, prompt: str, max_retries: int = 2) -> Dict[str, Any]:
         """Call the model; parse JSON; fallback on errors."""
         if self._client is None:
@@ -118,21 +119,21 @@ class LLMGenerator:
                 resp = self._client.generate_content(prompt, generation_config={"temperature": 0.0})
                 last_text = _extract_response_text(resp)
                 if not last_text:
-                    print(f"LLM call returned empty text (attempt {attempt}).")
+                    logger.info(f"LLM call returned empty text (attempt {attempt}).")
                     continue
                 
                 data = _safe_json_loads(last_text)
                 if isinstance(data, dict):
                     return self._normalize_output(data)
                 else:
-                    print(f"Failed to parse JSON from model output (attempt {attempt}).")
+                    logger.info(f"Failed to parse JSON from model output (attempt {attempt}).")
 
             except Exception as e:
-                print(f"LLM call failed (attempt {attempt}): {e}")
+                logger.info(f"LLM call failed (attempt {attempt}): {e}")
 
-        print("Falling back after repeated parse/generation errors.")
+        logger.info("Falling back after repeated parse/generation errors.")
         if last_text:
-            print("Last raw model text (truncated):", last_text[:300])
+            logger.info("Last raw model text (truncated):", last_text[:300])
         return self._fallback()
 
     def _normalize_output(self, data: Dict[str, Any]) -> Dict[str, Any]:

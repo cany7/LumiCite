@@ -6,8 +6,14 @@ import pickle
 import time
 from sentence_transformers import SentenceTransformer
 from typing import Dict, Any
+from src.config.settings import get_settings
+from src.core.logging import get_logger, timed
+from src.core.paths import find_project_root
+
+logger = get_logger(__name__)
 
 
+@timed("retrieve")
 def get_chunks(question: str, num_chunks: int = 3) -> Dict[int, Dict[str, Any]]:
     """
     High-level helper that:
@@ -27,25 +33,14 @@ def get_chunks(question: str, num_chunks: int = 3) -> Dict[int, Dict[str, Any]]:
     # ----------------------------
     # Lazy one-time initialization
     # ----------------------------
+    settings = get_settings()
     if not hasattr(get_chunks, "_initialized"):
-        # --- locate project root (inlined version of find_project_root) ---
+        # --- locate project root ---
         try:
-            try:
-                path = Path(__file__).resolve()
-            except NameError:
-                # interactive sessions (Jupyter, REPL, etc.)
-                print("Warning: __file__ is undefined, using current working directory as fallback.")
-                path = Path.cwd()
-
-            while not ((path / "src").exists() and (path / "data").exists()):
-                if path.parent == path:
-                    raise FileNotFoundError("Could not find project root directory.")
-                path = path.parent
-
-            root_dir = path
+            root_dir = find_project_root()
         except FileNotFoundError as e:
-            print(f"Fatal Error: {e}")
-            print("Falling back to the current working directory as a last resort.")
+            logger.info(f"Fatal Error: {e}")
+            logger.info("Falling back to the current working directory as a last resort.")
             root_dir = Path.cwd()
             if not root_dir.exists():
                 raise FileNotFoundError(
@@ -70,13 +65,13 @@ def get_chunks(question: str, num_chunks: int = 3) -> Dict[int, Dict[str, Any]]:
         get_chunks._embeddings_file = embeddings_file
 
         # --- load SentenceTransformer model (same as in FaissSearch.__init__) ---
-        model_name = "all-MiniLM-L6-v2"
-        print(f"Loading Sentence Transformer model ({model_name})...")
+        model_name = settings.embedding_model
+        logger.info(f"Loading Sentence Transformer model ({model_name})...")
         try:
             model = SentenceTransformer(model_name)
-            print("Model loaded successfully.")
+            logger.info("Model loaded successfully.")
         except Exception as e:
-            print(f"Error: Failed to load model '{model_name}': {e}")
+            logger.info(f"Error: Failed to load model '{model_name}': {e}")
             raise
         get_chunks._model = model
 
@@ -85,25 +80,25 @@ def get_chunks(question: str, num_chunks: int = 3) -> Dict[int, Dict[str, Any]]:
         text_data = []
 
         if index_file.exists() and text_data_file.exists():
-            print(f"Loading existing index from {index_file.parent}...")
+            logger.info(f"Loading existing index from {index_file.parent}...")
             try:
                 index = faiss.read_index(str(index_file))
                 with open(text_data_file, "rb") as f:
                     text_data = pickle.load(f)
-                print("FAISS index and text data loaded successfully.")
+                logger.info("FAISS index and text data loaded successfully.")
             except Exception as e:
-                print(f"Error loading index or text data: {e}")
+                logger.info(f"Error loading index or text data: {e}")
                 index = None
                 text_data = []
 
         if index is None or not text_data:
-            print("Existing index not found or failed to load; building a new one...")
+            logger.info("Existing index not found or failed to load; building a new one...")
             if not embeddings_file.exists():
                 raise FileNotFoundError(
                     f"Fatal Error: Cannot build index because {embeddings_file} is missing."
                 )
 
-            print(f"Loading embeddings from {embeddings_file} to build FAISS index...")
+            logger.info(f"Loading embeddings from {embeddings_file} to build FAISS index...")
             embeddings_list = []
             text_data = []
 
@@ -127,7 +122,7 @@ def get_chunks(question: str, num_chunks: int = 3) -> Dict[int, Dict[str, Any]]:
 
             index = faiss.IndexFlatL2(d)
             index.add(embeddings)
-            print(f"FAISS index built (contains {index.ntotal} vectors).")
+            logger.info(f"FAISS index built (contains {index.ntotal} vectors).")
 
             # save for future runs
             try:
@@ -135,10 +130,10 @@ def get_chunks(question: str, num_chunks: int = 3) -> Dict[int, Dict[str, Any]]:
                 faiss.write_index(index, str(index_file))
                 with open(text_data_file, "wb") as f_out:
                     pickle.dump(text_data, f_out)
-                print(f"FAISS index saved to: {index_file}")
-                print(f"Text data saved to: {text_data_file}")
+                logger.info(f"FAISS index saved to: {index_file}")
+                logger.info(f"Text data saved to: {text_data_file}")
             except Exception as e:
-                print(f"Error saving index or text data: {e}")
+                logger.info(f"Error saving index or text data: {e}")
 
         get_chunks._index = index
         get_chunks._text_data = text_data
@@ -157,22 +152,25 @@ def get_chunks(question: str, num_chunks: int = 3) -> Dict[int, Dict[str, Any]]:
     if num_chunks <= 0:
         return {}
 
-    print(f"Searching FAISS for: '{question[:50]}...'")
+    logger.info(f"Searching FAISS for: '{question[:50]}...'")
     start_time = time.time()
 
     query_embedding = model.encode([question], convert_to_numpy=True).astype("float32")
     distances, indices = index.search(query_embedding, num_chunks)
 
-    print("\nSquared L2 distances for top results:")
+    logger.info("\nSquared L2 distances for top results:")
     for rank in range(min(num_chunks, len(indices[0]))):
-        print(f"  Rank {rank + 1}: {distances[0][rank]}")
+        logger.info(f"  Rank {rank + 1}: {distances[0][rank]}")
 
     # --- CUT OFF: Reject if top distance is too large ---
-    BEST_DISTANCE_THRESHOLD = 1.2
+    best_distance_threshold = settings.distance_threshold
     best_dist = float(distances[0][0])
 
-    if best_dist > BEST_DISTANCE_THRESHOLD:
-        print(f"\nBest distance {best_dist:.4f} exceeds threshold {BEST_DISTANCE_THRESHOLD}. Returning None.")
+    if best_dist > best_distance_threshold:
+        logger.info(
+            f"\nBest distance {best_dist:.4f} exceeds threshold "
+            f"{best_distance_threshold}. Returning None."
+        )
         return None
 
     # -----------------
@@ -200,7 +198,7 @@ def get_chunks(question: str, num_chunks: int = 3) -> Dict[int, Dict[str, Any]]:
                 "rank": rank,
             }
 
-    print(f"\nRetrieved {len(results)} chunks in {time.time() - start_time:.4f} seconds.")
+    logger.info(f"\nRetrieved {len(results)} chunks in {time.time() - start_time:.4f} seconds.")
     return results
 
 import requests
@@ -230,7 +228,7 @@ def rag_gemma3_answer(
     # 1. Fallback if we don't trust the retrieval stage
     if not chunks_dict:
         fallback = "Unable to sufficiently answer query"
-        print(fallback)
+        logger.info(fallback)
         return fallback
 
     # 2. Build context from chunks, sorted by rank
@@ -293,7 +291,7 @@ Answer:"""
         response.raise_for_status()
     except requests.RequestException as e:
         # Network/model error fallback
-        print(f"Error calling Gemma3 via Ollama: {e}")
+        logger.info(f"Error calling Gemma3 via Ollama: {e}")
         return "Error calling Gemma3 via Ollama."
 
     data = response.json()
@@ -311,14 +309,13 @@ Answer:"""
 if __name__ == "__main__":
     question = "What were the net CO2e emissions from training the GShard-600B model?"
     chunks = get_chunks(question, num_chunks=3)
-    print(chunks)
+    logger.info(chunks)
 
     model_answer = rag_gemma3_answer(question, chunks)
-    print(f"\nModel answer: {model_answer}")
+    logger.info(f"\nModel answer: {model_answer}")
 
     #
     # for rank, info in chunks.items():
-    #     print(f"\nRank {rank}")
-    #     print("Paper:", info["paper"])
-    #     print("Chunk:", info["chunk"][:200], "...")
-
+    #     logger.info(f"\nRank {rank}")
+    #     logger.info("Paper:", info["paper"])
+    #     logger.info("Chunk:", info["chunk"][:200], "...")

@@ -17,6 +17,9 @@ import pandas as pd
 from PIL import Image
 import google.generativeai as genai
 from pathlib import Path
+from src.core.logging import get_logger
+
+logger = get_logger(__name__)
 
 def generate_image_chunk_ids(pdf_id, image_count):
     # Generate image chunk IDs to avoid conflict with text chunks
@@ -260,13 +263,13 @@ def batch_generate_alt_text():
                     "heading_name": file_name_no_suffix,
                 }
             )
-        print(f"[Progress] {pdf_counter}/{total_pdfs} PDFs processed — {ref_id} ({len(group)} figures)")
+        logger.info(f"[Progress] {pdf_counter}/{total_pdfs} PDFs processed — {ref_id} ({len(group)} figures)")
 
     df_out, json_grouped = build_outputs(processed_rows)
     save_csv_and_json(df_out, json_grouped, OUTCSV_PATH, OUTJSON_PATH)
 
-    print(f"[Done] CSV saved to: {OUTCSV_PATH}")
-    print(f"[Done] JSON saved to: {OUTJSON_PATH}")
+    logger.info(f"[Done] CSV saved to: {OUTCSV_PATH}")
+    logger.info(f"[Done] JSON saved to: {OUTJSON_PATH}")
 
 
 if __name__ == "__main__":

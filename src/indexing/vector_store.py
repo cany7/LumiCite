@@ -15,34 +15,11 @@ from pathlib import Path
 from huggingface_hub import paper_info
 from sentence_transformers import SentenceTransformer
 from typing import List, Dict, Any, Optional
+from src.config.settings import get_settings
+from src.core.logging import get_logger
+from src.core.paths import find_project_root
 
-
-# --- 1. Helper Functions for Path Management ---
-
-def find_project_root() -> Path:
-    """
-    Locate the project root directory by traversing up from the current file.
-
-    Raises:
-        FileNotFoundError: If the project root directory cannot be found.
-    """
-    try:
-        # Start from the current file's location
-        path = Path(__file__).resolve()
-    except NameError:
-        # Fallback for interactive environments (like Jupyter, terminals)
-        print("Warning: __file__ is undefined, using current working directory as fallback.")
-        path = Path.cwd()
-
-    # Traverse upwards until we find a repo-like root with src/ and data/
-    while not ((path / "src").exists() and (path / "data").exists()):
-        if path.parent == path:
-            # This check detects if we've reached the filesystem root (e.g., '/')
-            raise FileNotFoundError("Could not find project root directory.")
-        path = path.parent
-
-    print(f"Project root found: {path}")
-    return path
+logger = get_logger(__name__)
 
 
 def locate_embeddings_file(root_dir: Path) -> Path:
@@ -74,10 +51,12 @@ class FaissSearch:
     using SentenceTransformer for text encoding.
     """
 
-    def __init__(self,
-                 index_path: Path,
-                 text_data_path: Path,
-                 model_name: str = 'all-MiniLM-L6-v2'):
+    def __init__(
+        self,
+        index_path: Path,
+        text_data_path: Path,
+        model_name: Optional[str] = None,
+    ):
         """
         Initializes the searcher.
 
@@ -88,17 +67,18 @@ class FaissSearch:
         """
         self.index_path = index_path
         self.text_data_path = text_data_path
-        self.model_name = model_name
+        settings = get_settings()
+        self.model_name = model_name or settings.embedding_model
 
         self.index: Optional[faiss.Index] = None
         self.text_data: List[Dict[str, Any]] = []
 
-        print(f"Loading Sentence Transformer model ({self.model_name})...")
+        logger.info(f"Loading Sentence Transformer model ({self.model_name})...")
         try:
             self.model = SentenceTransformer(self.model_name)
-            print("Model loaded successfully.")
+            logger.info("Model loaded successfully.")
         except Exception as e:
-            print(f"Error: Failed to load model '{self.model_name}': {e}")
+            logger.info(f"Error: Failed to load model '{self.model_name}': {e}")
             self.model = None
             raise
 
@@ -110,19 +90,19 @@ class FaissSearch:
             bool: True if loading was successful, False otherwise.
         """
         if self.index_path.exists() and self.text_data_path.exists():
-            print(f"Loading existing index from {self.index_path.parent}...")
+            logger.info(f"Loading existing index from {self.index_path.parent}...")
             try:
                 self.index = faiss.read_index(str(self.index_path))
                 with open(self.text_data_path, "rb") as f:
                     self.text_data = pickle.load(f)
-                print(f"FAISS index and text data loaded successfully.")
+                logger.info(f"FAISS index and text data loaded successfully.")
                 return True
             except Exception as e:
-                print(f"Error loading index or text data: {e}")
+                logger.info(f"Error loading index or text data: {e}")
                 self.index = None
                 self.text_data = []
                 return False
-        print("Existing index files not found.")
+        logger.info("Existing index files not found.")
         return False
 
     def build_index(self, jsonl_file: Path):
@@ -138,7 +118,7 @@ class FaissSearch:
         if self.model is None:
             raise RuntimeError("SentenceTransformer model is not loaded, cannot build index.")
 
-        print(f"Loading embeddings from {jsonl_file} to build FAISS index...")
+        logger.info(f"Loading embeddings from {jsonl_file} to build FAISS index...")
         embeddings_list = []
         self.text_data = []
 
@@ -162,7 +142,7 @@ class FaissSearch:
         # We use IndexFlatL2 for exact, brute-force search (Euclidean distance)
         self.index = faiss.IndexFlatL2(d)
         self.index.add(embeddings)
-        print(f"FAISS index built (contains {self.index.ntotal} vectors).")
+        logger.info(f"FAISS index built (contains {self.index.ntotal} vectors).")
 
         # Save index and text data
         try:
@@ -171,32 +151,32 @@ class FaissSearch:
             faiss.write_index(self.index, str(self.index_path))
             with open(self.text_data_path, "wb") as f_out:
                 pickle.dump(self.text_data, f_out)
-            print(f"FAISS index saved to: {self.index_path}")
-            print(f"Text data saved to: {self.text_data_path}")
+            logger.info(f"FAISS index saved to: {self.index_path}")
+            logger.info(f"Text data saved to: {self.text_data_path}")
         except Exception as e:
-            print(f"Error saving index or text data: {e}")
+            logger.info(f"Error saving index or text data: {e}")
 
     def search(self, question: str, k: int = 3):
         if self.index is None or self.model is None or not self.text_data:
             raise RuntimeError("Index, model, or text data not loaded.")
 
-        print(f"Searching FAISS for: '{question[:50]}...'")
+        logger.info(f"Searching FAISS for: '{question[:50]}...'")
         start_time = time.time()
 
         question_embedding = self.model.encode([question], convert_to_numpy=True).astype('float32')
 
         distances, indices = self.index.search(question_embedding, k)
 
-        print("\nSquared L2 distances for top results:")
+        logger.info("\nSquared L2 distances for top results:")
         for rank in range(k):
-            print(f"  Rank {rank + 1}: {distances[0][rank]}")
+            logger.info(f"  Rank {rank + 1}: {distances[0][rank]}")
 
         results = []
         for i in indices[0]:
             if 0 <= i < len(self.text_data):
                 results.append(self.text_data[i])
 
-        print(f"\nRetrieved {len(results)} chunks in {time.time() - start_time:.4f} seconds.")
+        logger.info(f"\nRetrieved {len(results)} chunks in {time.time() - start_time:.4f} seconds.")
         return results
 
 
@@ -210,12 +190,12 @@ if __name__ == "__main__":
         ROOT_DIR = find_project_root()
 
     except FileNotFoundError as e:
-        print(f"Fatal Error: {e}")
-        print("Falling back to the current working directory as a last resort.")
+        logger.info(f"Fatal Error: {e}")
+        logger.info("Falling back to the current working directory as a last resort.")
         ROOT_DIR = Path.cwd()
 
         if not ROOT_DIR.exists():
-            print(f"Error: Hardcoded fallback ROOT_DIR does not exist: {ROOT_DIR}")
+            logger.info(f"Error: Hardcoded fallback ROOT_DIR does not exist: {ROOT_DIR}")
             sys.exit(1)  # Exit if the fallback also fails
 
     # 2. Define all other paths relative to the root
@@ -239,7 +219,7 @@ if __name__ == "__main__":
         if FORCE_REBUILD or not searcher.load_index():  # <--- 修改了这一行
 
             if FORCE_REBUILD:
-                print("\n--- ⚠️ 强制重建模式已开启 ---")
+                logger.info("\n--- ⚠️ 强制重建模式已开启 ---")
                 # 如果文件存在，可以在这里添加删除旧文件的代码（可选）
                 if INDEX_FILE.exists():
                     INDEX_FILE.unlink()
@@ -247,11 +227,11 @@ if __name__ == "__main__":
                     TEXT_DATA_FILE.unlink()
 
             else:  # 只有在 FORCE_REBUILD=False 且加载失败时才打印这个
-                print("Failed to load existing index, building a new one...")
+                logger.info("Failed to load existing index, building a new one...")
 
             # Safety check: ensure the source file exists before building
             if not INPUT_FILE.exists():
-                print(f"Fatal Error: Cannot build index because {INPUT_FILE} is missing.")
+                logger.info(f"Fatal Error: Cannot build index because {INPUT_FILE} is missing.")
                 sys.exit(1)
 
             # 构建新的索引，它会覆盖旧文件
@@ -259,21 +239,21 @@ if __name__ == "__main__":
 
 
         # --- 3.3. Perform an Example Search ---
-        print("\n" + "=" * 20)
+        logger.info("\n" + "=" * 20)
         question = "what is your favorite color?"  # <--- Change your query here
         results = searcher.search(question, k=3)
 
-        print(f"\n--- Search Results for '{question}' ---")
+        logger.info(f"\n--- Search Results for '{question}' ---")
         if results:
             for i, res in enumerate(results):
-                print(f"\nResult {i + 1}:")
-                print(f"  ID: {res.get('id')}")
-                print(f"  Text: {res.get('text')[:]}...")  # Print first 150 chars
+                logger.info(f"\nResult {i + 1}:")
+                logger.info(f"  ID: {res.get('id')}")
+                logger.info(f"  Text: {res.get('text')[:]}...")  # Print first 150 chars
         else:
-            print("No results found.")
+            logger.info("No results found.")
 
     except Exception as e:
-        print(f"\nAn unexpected error occurred during main execution: {e}")
+        logger.info(f"\nAn unexpected error occurred during main execution: {e}")
         # For detailed debugging, uncomment the lines below
         # import traceback
 #       # traceback.print_exc()

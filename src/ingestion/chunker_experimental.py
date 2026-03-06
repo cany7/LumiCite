@@ -2,6 +2,9 @@ from langchain_experimental.text_splitter import SemanticChunker
 from langchain_huggingface import HuggingFaceEmbeddings
 from llama_parse import LlamaParse
 import os
+from src.core.logging import get_logger
+
+logger = get_logger(__name__)
 
 def extract(pdf_path: str) -> str:
     # Get API key from environment
@@ -36,7 +39,7 @@ def chunk(text: str) -> list[str]:
 
     # Chunk
     chunks = splitter.split_text(text)
-    print(f"Created {len(chunks)} chunks.")
+    logger.info(f"Created {len(chunks)} chunks.")
     return chunks
 
 extracted_text = extract("data/pdf/chen2024.pdf")

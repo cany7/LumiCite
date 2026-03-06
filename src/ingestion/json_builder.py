@@ -3,28 +3,27 @@ import json
 import uuid
 from .load_files import load_metadata_df, get_PDF_paths
 from .chunker import extract_pdf_chunks
+from src.core.logging import get_logger
+from src.core.paths import find_project_root
+
+logger = get_logger(__name__)
 
 def access_json():
     """Locate and load the JSON file if it exists, otherwise return an empty dict."""
-    path = Path(__file__).resolve()
-
-    while not ((path / "src").exists() and (path / "data").exists()):
-        if path.parent == path:
-            raise RuntimeError("Project root directory not found")
-        path = path.parent
+    path = find_project_root()
 
     JSON_dir = path / "data" / "JSON"
     JSON_dir.mkdir(parents=True, exist_ok=True)
     JSON_file = JSON_dir / "chunks.json"
 
     if JSON_file.exists():
-        print(f"{JSON_file.name} exists. Loading...")
+        logger.info(f"{JSON_file.name} exists. Loading...")
         with open(JSON_file, "r", encoding="utf-8") as f:
             data = json.load(f)
-        print("JSON loaded successfully!")
+        logger.info("JSON loaded successfully!")
         return data, JSON_file
     else:
-        print(f"{JSON_file.name} does not exist, creating new one...")
+        logger.info(f"{JSON_file.name} does not exist, creating new one...")
         return {}, JSON_file
 
 
@@ -44,19 +43,19 @@ def build_json():
     for pdf_id in df_meta["id"]:
         pdf_path = pdf_dict.get(pdf_id)
         if not pdf_path:
-            print(f"Metadata ID {pdf_id} not found in downloaded PDFs, skipping...")
+            logger.info(f"Metadata ID {pdf_id} not found in downloaded PDFs, skipping...")
             continue
 
         if pdf_id in chunks_json:
-            print(f"ID {pdf_id} already in JSON, skipping...")
+            logger.info(f"ID {pdf_id} already in JSON, skipping...")
             continue
 
-        print(f"\n📄 Extracting chunks for {pdf_id}...")
+        logger.info(f"\n📄 Extracting chunks for {pdf_id}...")
 
         try:
             chunks_list = extract_pdf_chunks(pdf_path)
         except Exception as e:
-            print(f"⚠️ Error extracting {pdf_id}: {e}")
+            logger.info(f"⚠️ Error extracting {pdf_id}: {e}")
             continue
 
         pdf_chunks = []
@@ -75,9 +74,9 @@ def build_json():
 
         # 💾 Save progress immediately after each PDF
         save_json_safely(chunks_json, JSON_file)
-        print(f"✅ Saved progress after {pdf_id}")
+        logger.info(f"✅ Saved progress after {pdf_id}")
 
-    print(f"\n🎉 All available PDFs processed. Final JSON at: {JSON_file}")
+    logger.info(f"\n🎉 All available PDFs processed. Final JSON at: {JSON_file}")
 
 
 if __name__ == "__main__":

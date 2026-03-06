@@ -2,9 +2,7 @@
 from __future__ import annotations
 
 from typing import List, Dict, Any
-
-
-FALLBACK_ANSWER = "Unable to answer with confidence based on the provided documents."
+from src.core.constants import FALLBACK_ANSWER
 
 
 def build_prompt(question: str, contexts: List[Dict], candidate_ref_ids: List[str]) -> str:

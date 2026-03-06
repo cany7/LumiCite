@@ -3,6 +3,9 @@
 from typing import Dict, Any, Optional
 import json
 import requests
+from src.core.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 def rag_ollama_answer(
@@ -61,9 +64,9 @@ def rag_ollama_answer(
                 models = resp.json().get("models", [])
                 if models:
                     model = models[0].get("name", "llama2")
-                    print(f"Auto-detected model: {model}")
+                    logger.info(f"Auto-detected model: {model}")
                 else:
-                    print("No Ollama models found. Please run: ollama pull llama2")
+                    logger.info("No Ollama models found. Please run: ollama pull llama2")
                     return FALLBACK
             else:
                 model = "llama2"
@@ -72,7 +75,7 @@ def rag_ollama_answer(
 
     # Handle no chunks / failed retrieval
     if not chunks_dict:
-        print("No chunks retrieved - returning fallback")
+        logger.info("No chunks retrieved - returning fallback")
         return FALLBACK
 
     # Build context from chunks
@@ -147,7 +150,7 @@ JSON only, no other text:"""
 
     # Call Ollama API
     try:
-        print(f"Calling Ollama with model: {model}")
+        logger.info(f"Calling Ollama with model: {model}")
 
         response = requests.post(
             f"{ollama_url}/api/generate",
@@ -164,14 +167,14 @@ JSON only, no other text:"""
         )
 
         if response.status_code != 200:
-            print(f"Ollama API error: {response.status_code} - {response.text}")
+            logger.info(f"Ollama API error: {response.status_code} - {response.text}")
             return FALLBACK
 
         # Parse Ollama response
         ollama_result = response.json()
         content = ollama_result.get("response", "").strip()
 
-        print(f"Raw Ollama response: {content[:200]}...")
+        logger.info(f"Raw Ollama response: {content[:200]}...")
 
         # Try to parse JSON from response
         try:
@@ -192,15 +195,15 @@ JSON only, no other text:"""
                 start = content.find("{")
                 end = content.rfind("}")
                 if start == -1 or end == -1:
-                    print(f"Could not find JSON in response: {content[:300]}")
+                    logger.info(f"Could not find JSON in response: {content[:300]}")
                     return FALLBACK
                 json_str = content[start:end + 1]
 
             try:
                 result = json.loads(json_str)
             except json.JSONDecodeError as e:
-                print(f"Failed to parse JSON: {e}")
-                print(f"Attempted to parse: {json_str[:300]}")
+                logger.info(f"Failed to parse JSON: {e}")
+                logger.info(f"Attempted to parse: {json_str[:300]}")
                 return FALLBACK
 
         # Validate and normalize output
@@ -251,16 +254,16 @@ JSON only, no other text:"""
         }
 
     except requests.exceptions.ConnectionError:
-        print("Error: Cannot connect to Ollama. Make sure:")
-        print("  1. Ollama is installed: https://ollama.ai/download")
-        print("  2. Ollama is running: 'ollama serve' or check if running")
-        print(f"  3. Ollama is accessible at: {ollama_url}")
+        logger.info("Error: Cannot connect to Ollama. Make sure:")
+        logger.info("  1. Ollama is installed: https://ollama.ai/download")
+        logger.info("  2. Ollama is running: 'ollama serve' or check if running")
+        logger.info(f"  3. Ollama is accessible at: {ollama_url}")
         return FALLBACK
     except requests.exceptions.Timeout:
-        print("Error: Ollama request timed out. Model may be too slow or not loaded.")
+        logger.info("Error: Ollama request timed out. Model may be too slow or not loaded.")
         return FALLBACK
     except Exception as e:
-        print(f"Error calling Ollama API: {e}")
+        logger.info(f"Error calling Ollama API: {e}")
         return FALLBACK
 
 
@@ -271,19 +274,19 @@ if __name__ == "__main__":
         response = requests.get("http://localhost:11434/api/tags", timeout=5)
         if response.status_code == 200:
             models = response.json().get("models", [])
-            print("Available Ollama models:")
+            logger.info("Available Ollama models:")
             for m in models:
-                print(f"  - {m.get('name', 'unknown')}")
-            print()
+                logger.info(f"  - {m.get('name', 'unknown')}")
+            logger.info()
         else:
-            print("Warning: Ollama API accessible but returned unexpected response")
+            logger.info("Warning: Ollama API accessible but returned unexpected response")
     except requests.exceptions.ConnectionError:
-        print("ERROR: Cannot connect to Ollama!")
-        print("\nPlease install and start Ollama:")
-        print("  1. Download from: https://ollama.ai/download")
-        print("  2. Install and restart terminal")
-        print("  3. Pull a model: ollama pull llama2")
-        print("  4. Run this script again\n")
+        logger.info("ERROR: Cannot connect to Ollama!")
+        logger.info("\nPlease install and start Ollama:")
+        logger.info("  1. Download from: https://ollama.ai/download")
+        logger.info("  2. Install and restart terminal")
+        logger.info("  3. Pull a model: ollama pull llama2")
+        logger.info("  4. Run this script again\n")
         exit(1)
 
     from retrieval import get_chunks
@@ -291,34 +294,34 @@ if __name__ == "__main__":
     # Test question
     question = "What were the net CO2e emissions from training the GShard-600B model?"
 
-    print(f"Question: {question}\n")
+    logger.info(f"Question: {question}\n")
 
     # Step 1: Retrieve chunks
-    print("Step 1: Retrieving relevant chunks...")
+    logger.info("Step 1: Retrieving relevant chunks...")
     chunks = get_chunks(question, num_chunks=3)
 
     if chunks:
-        print(f"Retrieved {len(chunks)} chunks\n")
+        logger.info(f"Retrieved {len(chunks)} chunks\n")
         for rank, info in chunks.items():
-            print(f"Rank {rank} - Paper: {info['paper']}")
-            print(f"Preview: {info['chunk'][:150]}...\n")
+            logger.info(f"Rank {rank} - Paper: {info['paper']}")
+            logger.info(f"Preview: {info['chunk'][:150]}...\n")
     else:
-        print("No chunks retrieved\n")
+        logger.info("No chunks retrieved\n")
 
     # Step 2: Generate answer
-    print("Step 2: Generating answer with Ollama...")
-    print("(This may take 10-30 seconds for local generation)\n")
+    logger.info("Step 2: Generating answer with Ollama...")
+    logger.info("(This may take 10-30 seconds for local generation)\n")
 
     # Auto-detect available model (will use gemma2:2b if available)
     result = rag_ollama_answer(question, chunks, model=None)
 
     # Step 3: Display results
-    print("\n" + "=" * 60)
-    print("FINAL ANSWER")
-    print("=" * 60)
-    print(f"Answer: {result['answer']}")
-    print(f"Answer Value: {result['answer_value']}")
-    print(f"Answer Unit: {result['answer_unit']}")
-    print(f"Reference IDs: {result['ref_id']}")
-    print(f"Supporting Materials: {result['supporting_materials'][:200]}...")
-    print(f"Explanation: {result['explanation']}")
+    logger.info("\n" + "=" * 60)
+    logger.info("FINAL ANSWER")
+    logger.info("=" * 60)
+    logger.info(f"Answer: {result['answer']}")
+    logger.info(f"Answer Value: {result['answer_value']}")
+    logger.info(f"Answer Unit: {result['answer_unit']}")
+    logger.info(f"Reference IDs: {result['ref_id']}")
+    logger.info(f"Supporting Materials: {result['supporting_materials'][:200]}...")
+    logger.info(f"Explanation: {result['explanation']}")

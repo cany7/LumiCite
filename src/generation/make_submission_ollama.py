@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.indexing.vector_store import find_project_root
 from src.indexing.retrieval import get_chunks
 from src.indexing.ollama_generator import rag_ollama_answer
+from src.core.logging import get_logger
 
 
 # Output schema (column order)
@@ -29,6 +30,8 @@ REQUIRED_COLS: List[str] = [
     "supporting_materials",
     "explanation",
 ]
+
+logger = get_logger(__name__)
 
 
 def parse_args() -> argparse.Namespace:
@@ -54,7 +57,7 @@ def load_metadata_map(root: Path) -> dict:
 
     meta_path = root / "data" / "metadata" / "metadata.csv"
     if not meta_path.exists():
-        print(f"Warning: metadata file not found at {meta_path}")
+        logger.info(f"Warning: metadata file not found at {meta_path}")
         return {}
 
     m = {}
@@ -86,10 +89,10 @@ def load_existing_progress(output_path: Path) -> tuple[pd.DataFrame | None, set[
     try:
         df_existing = pd.read_csv(output_path)
         completed_ids = set(df_existing["id"].astype(str).tolist())
-        print(f"📂 Found existing output with {len(completed_ids)} completed questions")
+        logger.info(f"📂 Found existing output with {len(completed_ids)} completed questions")
         return df_existing, completed_ids
     except Exception as e:
-        print(f"⚠️  Error loading existing output: {e}")
+        logger.info(f"⚠️  Error loading existing output: {e}")
         return None, set()
 
 
@@ -120,7 +123,7 @@ def main() -> None:
     outp = Path(args.output)
     outp.parent.mkdir(parents=True, exist_ok=True)
 
-    print(f"Input: {inp}")
+    logger.info(f"Input: {inp}")
     if not inp.exists():
         raise FileNotFoundError(f"Input file not found: {inp}")
 
@@ -128,7 +131,7 @@ def main() -> None:
     if "id" not in df_in.columns or "question" not in df_in.columns:
         raise ValueError("Input CSV must contain 'id' and 'question' columns")
 
-    print(f"Loading metadata...")
+    logger.info(f"Loading metadata...")
     meta_map = load_metadata_map(root)
 
     # Load existing progress
@@ -140,20 +143,20 @@ def main() -> None:
         if df_existing is not None:
             # Convert existing DataFrame to list of dicts
             rows = df_existing.to_dict('records')
-            print(f"✅ Resuming from question {len(completed_ids) + 1}/{len(df_in)}")
+            logger.info(f"✅ Resuming from question {len(completed_ids) + 1}/{len(df_in)}")
         else:
-            print(f"🆕 Starting fresh - no existing output found")
+            logger.info(f"🆕 Starting fresh - no existing output found")
     else:
         if args.force_restart:
-            print(f"🔄 Force restart - ignoring any existing output")
-        print(f"🆕 Starting from beginning")
+            logger.info(f"🔄 Force restart - ignoring any existing output")
+        logger.info(f"🆕 Starting from beginning")
 
     total_questions = len(df_in)
     remaining = total_questions - len(completed_ids)
 
-    print(f"Processing {remaining} remaining questions out of {total_questions} total")
-    print(f"Config: top_k={args.top_k}, model={args.model or 'auto-detect'}")
-    print("=" * 80)
+    logger.info(f"Processing {remaining} remaining questions out of {total_questions} total")
+    logger.info(f"Config: top_k={args.top_k}, model={args.model or 'auto-detect'}")
+    logger.info("=" * 80)
 
     processed_count = 0
 
@@ -162,7 +165,7 @@ def main() -> None:
         question = str(row["question"]) if pd.notna(row["question"]) else ""
 
         if not qid or not question:
-            print(f"⚠️  Skipping row {idx} with missing id/question")
+            logger.info(f"⚠️  Skipping row {idx} with missing id/question")
             continue
 
         # Skip if already completed
@@ -171,24 +174,24 @@ def main() -> None:
 
         processed_count += 1
         progress = len(completed_ids) + processed_count
-        print(f"\n[{progress}/{total_questions}] Q {qid}: {question[:70]}{'...' if len(question)>70 else ''}")
+        logger.info(f"\n[{progress}/{total_questions}] Q {qid}: {question[:70]}{'...' if len(question)>70 else ''}")
 
         # Step 1: Retrieve chunks
         try:
             chunks = get_chunks(question, num_chunks=args.top_k)
             if chunks:
-                print(f"  ✓ Retrieved {len(chunks)} chunks")
+                logger.info(f"  ✓ Retrieved {len(chunks)} chunks")
             else:
-                print(f"  ⚠️  No chunks retrieved - will return fallback answer")
+                logger.info(f"  ⚠️  No chunks retrieved - will return fallback answer")
         except Exception as e:
-            print(f"  ❌ Error retrieving chunks: {e}")
+            logger.info(f"  ❌ Error retrieving chunks: {e}")
             chunks = None
 
         # Step 2: Generate answer with Ollama
         try:
             result = rag_ollama_answer(question, chunks, model=args.model)
         except Exception as e:
-            print(f"  ❌ Error generating answer: {e}")
+            logger.info(f"  ❌ Error generating answer: {e}")
             result = {
                 "answer": "Unable to answer with confidence based on the provided documents.",
                 "answer_value": "is_blank",
@@ -229,24 +232,24 @@ def main() -> None:
 
         # Print answer preview
         answer_preview = result.get('answer', '')[:70]
-        print(f"  ✓ Answer: {answer_preview}{'...' if len(result.get('answer', ''))>70 else ''}")
+        logger.info(f"  ✓ Answer: {answer_preview}{'...' if len(result.get('answer', ''))>70 else ''}")
 
         # Save progress after every question
         try:
             save_progress(rows, outp)
-            print(f"  💾 Progress saved ({progress}/{total_questions} complete)")
+            logger.info(f"  💾 Progress saved ({progress}/{total_questions} complete)")
         except Exception as e:
-            print(f"  ⚠️  Warning: Could not save progress: {e}")
+            logger.info(f"  ⚠️  Warning: Could not save progress: {e}")
 
     if not rows:
         raise RuntimeError("No answers generated; aborting without writing submission.")
 
     # Final save
-    print("\n" + "=" * 80)
-    print(f"✅ Complete! Processed {processed_count} new questions")
-    print(f"📊 Total answers in submission: {len(rows)}/{total_questions}")
-    print(f"💾 Output saved to: {outp}")
-    print("=" * 80)
+    logger.info("\n" + "=" * 80)
+    logger.info(f"✅ Complete! Processed {processed_count} new questions")
+    logger.info(f"📊 Total answers in submission: {len(rows)}/{total_questions}")
+    logger.info(f"💾 Output saved to: {outp}")
+    logger.info("=" * 80)
 
 
 if __name__ == "__main__":

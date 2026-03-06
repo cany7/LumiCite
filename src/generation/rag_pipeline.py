@@ -6,15 +6,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
-from src.indexing.vector_store import (
-    find_project_root,
-)
+from src.config.settings import get_settings
+from src.core.constants import FALLBACK_ANSWER
+from src.core.logging import get_logger
+from src.core.paths import find_project_root
 try:
     from src.indexing.retrieval import get_chunks as retrieval_get_chunks  # type: ignore
 except Exception:
     retrieval_get_chunks = None  # type: ignore
-from src.generation.generator import LLMGenerator, FALLBACK_ANSWER
+from src.generation.generator import LLMGenerator
 from src.generation.prompt_templates import build_prompt
+
+logger = get_logger(__name__)
 
 
 def _to_str_field(value: Any) -> str:
@@ -172,27 +175,50 @@ def _normalize_output(raw: Dict[str, Any], contexts: List[Dict[str, Any]]) -> Di
 
 @dataclass
 class RAGConfig:
-    top_k: int = 4
-    model_name: str = "gemini-2.5-flash"
-    project: str = "grand-analyzer-480502-q2"
-    location: str = "us-central1"
-    credentials_filename: str = "gmn.json"
+    top_k: int | None = None
+    model_name: str | None = None
+    project: str | None = None
+    location: str | None = None
+    credentials_path: str | None = None
+
+    @classmethod
+    def from_settings(cls) -> "RAGConfig":
+        settings = get_settings()
+        return cls(
+            top_k=settings.retrieval_top_k,
+            model_name=settings.gemini_model,
+            project=settings.gcp_project,
+            location=settings.gcp_location,
+            credentials_path=settings.gcp_credentials_path,
+        )
+
+    def __post_init__(self) -> None:
+        settings = get_settings()
+        if self.top_k is None:
+            self.top_k = settings.retrieval_top_k
+        if self.model_name is None:
+            self.model_name = settings.gemini_model
+        if self.project is None:
+            self.project = settings.gcp_project
+        if self.location is None:
+            self.location = settings.gcp_location
+        if self.credentials_path is None:
+            self.credentials_path = settings.gcp_credentials_path
 
 
 class RAGPipeline:
     def __init__(self, config: RAGConfig | None = None) -> None:
-        self.config = config or RAGConfig()
+        self.config = config or RAGConfig.from_settings()
         # Paths
         self.root = find_project_root()
         self.data_dir = self.root / "data"
         
         # LLM
-        credentials_full_path = self.root / "src" / "generation" / self.config.credentials_filename
         self.generator = LLMGenerator(
             model=self.config.model_name,
             project=self.config.project,
             location=self.config.location,
-            credentials_path=str(credentials_full_path),
+            credentials_path=self.config.credentials_path,
         )
 
         # Metadata
@@ -201,7 +227,7 @@ class RAGPipeline:
     def answer(self, qid: str, question: str) -> Dict[str, Any]:
         recs: List[Dict[str, Any]] = []
         if retrieval_get_chunks is None:
-            print("Error: retrieval function not found (src/indexing/retrieval.get_chunks). Proceeding without context; answers will fallback.")
+            logger.info("Error: retrieval function not found (src/indexing/retrieval.get_chunks). Proceeding without context; answers will fallback.")
         else:
             try:
                 res = retrieval_get_chunks(question, num_chunks=self.config.top_k)
@@ -215,7 +241,7 @@ class RAGPipeline:
                         }
                     )
             except Exception as e:
-                print(f"Error: retrieval_get_chunks failed; proceeding without context. Details: {e}")
+                logger.info(f"Error: retrieval_get_chunks failed; proceeding without context. Details: {e}")
         contexts, candidate_ref_ids = _build_contexts(recs)
 
         # Prompt and generate

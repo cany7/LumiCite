@@ -9,6 +9,7 @@ import pandas as pd
 
 from src.generation.rag_pipeline import RAGPipeline, RAGConfig
 from src.indexing.vector_store import find_project_root
+from src.core.logging import get_logger
 
 
 # Output schema (column order)
@@ -23,6 +24,8 @@ REQUIRED_COLS: List[str] = [
     "supporting_materials",
     "explanation",
 ]
+
+logger = get_logger(__name__)
 
 
 def parse_args() -> argparse.Namespace:
@@ -43,7 +46,7 @@ def load_existing_progress(output_path: Path) -> Tuple[List[dict], Set[str]]:
     try:
         df_existing = pd.read_csv(output_path)
     except Exception as exc:
-        print(f"Warning: Could not read existing output at {output_path}: {exc}")
+        logger.info(f"Warning: Could not read existing output at {output_path}: {exc}")
         return [], set()
 
     rows = df_existing.to_dict("records")
@@ -53,7 +56,7 @@ def load_existing_progress(output_path: Path) -> Tuple[List[dict], Set[str]]:
         if pd.notna(qid):
             completed_ids.add(str(qid))
     if completed_ids:
-        print(f"Found existing output with {len(completed_ids)} completed questions.")
+        logger.info(f"Found existing output with {len(completed_ids)} completed questions.")
     return rows, completed_ids
 
 
@@ -76,7 +79,7 @@ def main() -> None:
     outp = Path(args.output)
     outp.parent.mkdir(parents=True, exist_ok=True)
 
-    print(f"Input: {inp}")
+    logger.info(f"Input: {inp}")
     if not inp.exists():
         raise FileNotFoundError(f"Input CSV not found: {inp}")
 
@@ -85,7 +88,7 @@ def main() -> None:
     if "id" not in df_in.columns or "question" not in df_in.columns:
         raise ValueError("Input CSV must contain 'id' and 'question' columns")
 
-    print(f"Init pipeline (top_k={args.top_k})")
+    logger.info(f"Init pipeline (top_k={args.top_k})")
     rag_config = RAGConfig(top_k=args.top_k)
     pipe = RAGPipeline(config=rag_config)
 
@@ -93,12 +96,12 @@ def main() -> None:
     rows: List[dict]
     completed_ids: Set[str]
     if args.force_restart:
-        print("Force restart enabled - ignoring any previous submission file.")
+        logger.info("Force restart enabled - ignoring any previous submission file.")
         rows, completed_ids = [], set()
     else:
         rows, completed_ids = load_existing_progress(outp)
         if not rows:
-            print("No previous submission found - starting from the first question.")
+            logger.info("No previous submission found - starting from the first question.")
 
     new_answers = 0
 
@@ -107,21 +110,21 @@ def main() -> None:
             qid = str(row["id"]) if pd.notna(row["id"]) else ""
             question = str(row["question"]) if pd.notna(row["question"]) else ""
             if not qid or not question:
-                print(f"Skipping row with missing id/question: {row}")
+                logger.info(f"Skipping row with missing id/question: {row}")
                 continue
 
             if qid in completed_ids:
                 continue
             
             progress_idx = len(completed_ids) + 1
-            print(f"\n--- Question {progress_idx}/{total_questions} (ID: {qid}) ---")
-            print(f"Q: {question[:120]}{'...' if len(question)>120 else ''}")
+            logger.info(f"\n--- Question {progress_idx}/{total_questions} (ID: {qid}) ---")
+            logger.info(f"Q: {question[:120]}{'...' if len(question)>120 else ''}")
             
             rec = pipe.answer(qid, question)
             
             # Display the answer in the progress log
             ans = rec.get("answer", "N/A")
-            print(f"A: {ans}")
+            logger.info(f"A: {ans}")
             
             rows.append(rec)
             completed_ids.add(qid)
@@ -129,18 +132,18 @@ def main() -> None:
             
             try:
                 save_progress(rows, outp)
-                print(f"Progress saved ({len(completed_ids)}/{total_questions} answered).")
+                logger.info(f"Progress saved ({len(completed_ids)}/{total_questions} answered).")
             except Exception as exc:
-                print(f"Warning: Could not save progress: {exc}")
+                logger.info(f"Warning: Could not save progress: {exc}")
     except KeyboardInterrupt:
-        print("\nInterrupted by user. Partial progress saved; exiting early.")
+        logger.info("\nInterrupted by user. Partial progress saved; exiting early.")
 
     if not rows:
         raise RuntimeError("No answers generated; aborting without writing submission.")
 
-    print(f"\nFinished. Answered {len(completed_ids)}/{total_questions} questions "
+    logger.info(f"\nFinished. Answered {len(completed_ids)}/{total_questions} questions "
           f"(+{new_answers} this run).")
-    print(f"Output saved incrementally to: {outp}")
+    logger.info(f"Output saved incrementally to: {outp}")
 
 
 if __name__ == "__main__":
