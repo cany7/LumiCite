@@ -95,7 +95,4 @@ tmp/
 # ── Submission / output CSVs (optional – remove if you want to track) ─
 submission*.csv
 
-PROJECT_DOCUMENTATION.md
-PROJECT_DOCUMENTATION_ZH.md
-rag_pipeline_analysis.md
-RESUME_RAG_PROJECT.md
+md/
