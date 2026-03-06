@@ -15,17 +15,20 @@ runner = CliRunner()
 def test_query_stdout_conforms_to_phase1_contract(monkeypatch):
     monkeypatch.setattr(
         main_module,
-        "get_chunks",
-        lambda question, num_chunks=5: {
-            1: {
-                "chunk": "evidence text",
-                "paper": "paper1",
-                "page": 2,
-                "headings": ["Intro"],
+        "_retrieve_results",
+        lambda question, top_k, retrieval_mode, rerank=False: [
+            {
+                "rank": 1,
+                "chunk_id": "paper1_deadbeef",
+                "ref_id": "paper1",
                 "score": 0.9,
+                "text": "evidence text",
+                "page": 2,
                 "source_file": "paper1.pdf",
+                "headings": ["Intro"],
+                "chunk_type": "text",
             }
-        },
+        ],
     )
 
     class FakeGenerator:
@@ -59,7 +62,7 @@ def test_query_stdout_conforms_to_phase1_contract(monkeypatch):
 
 def test_query_output_writes_json_file(monkeypatch, tmp_path):
     out_path = tmp_path / "answer.json"
-    monkeypatch.setattr(main_module, "get_chunks", lambda question, num_chunks=5: {})
+    monkeypatch.setattr(main_module, "_retrieve_results", lambda question, top_k, retrieval_mode, rerank=False: [])
 
     result = runner.invoke(app, ["query", "What is the answer?", "--output", str(out_path)])
 
@@ -75,17 +78,20 @@ def test_search_json_contract_uses_settings_default(monkeypatch):
     get_settings.cache_clear()
     monkeypatch.setattr(
         main_module,
-        "get_chunks",
-        lambda question, num_chunks=10: {
-            1: {
-                "chunk": "match text",
-                "paper": "paper1",
+        "_retrieve_results",
+        lambda question, top_k, retrieval_mode, rerank=False: [
+            {
+                "rank": 1,
+                "chunk_id": "paper1_deadbeef",
+                "ref_id": "paper1",
                 "score": 0.7,
+                "text": "match text",
                 "page": 5,
                 "source_file": "paper1.pdf",
                 "headings": ["Results"],
+                "chunk_type": "text",
             }
-        },
+        ],
     )
 
     result = runner.invoke(app, ["search", "test question"])
@@ -102,17 +108,20 @@ def test_search_json_contract_uses_settings_default(monkeypatch):
 def test_search_table_output_returns_text_response(monkeypatch):
     monkeypatch.setattr(
         main_module,
-        "get_chunks",
-        lambda question, num_chunks=10: {
-            1: {
-                "chunk": "match text",
-                "paper": "paper1",
+        "_retrieve_results",
+        lambda question, top_k, retrieval_mode, rerank=False: [
+            {
+                "rank": 1,
+                "chunk_id": "paper1_deadbeef",
+                "ref_id": "paper1",
                 "score": 0.7,
+                "text": "match text",
                 "page": 5,
                 "source_file": "paper1.pdf",
                 "headings": ["Results"],
+                "chunk_type": "text",
             }
-        },
+        ],
     )
 
     result = runner.invoke(app, ["search", "test question", "--output-format", "table"])
@@ -135,8 +144,16 @@ def test_ingest_uses_settings_default_workers_and_writes_outputs(monkeypatch, tm
     monkeypatch.setattr(main_module, "embed_chunks", lambda records, model_name, batch_size: [[0.1, 0.2]])
     monkeypatch.setattr(
         main_module,
-        "_build_faiss_index",
-        lambda embeddings_path: (tmp_path / "data" / "my_faiss.index", tmp_path / "data" / "text_data.pkl", 1),
+        "_build_search_indices",
+        lambda chunks_path, embeddings_path, embedding_model: {
+            "faiss_index": str(tmp_path / "data" / "my_faiss.index"),
+            "faiss_metadata": str(tmp_path / "data" / "my_faiss.meta.json"),
+            "text_data": str(tmp_path / "data" / "text_data.pkl"),
+            "vectors": 1,
+            "bm25_index": str(tmp_path / "data" / "bm25_index.pkl"),
+            "bm25_metadata": str(tmp_path / "data" / "bm25_index.meta.json"),
+            "bm25_rows": 1,
+        },
     )
 
     result = runner.invoke(app, ["ingest", "--source", "local_dir"])
@@ -148,6 +165,8 @@ def test_ingest_uses_settings_default_workers_and_writes_outputs(monkeypatch, tm
     assert payload["chunks_written"] == 1
     assert payload["embeddings_written"] == 1
     assert payload["vectors"] == 1
+    assert payload["bm25_rows"] == 1
+    assert payload["indices_rebuilt"] is True
     assert (tmp_path / "data" / "JSON" / "chunks.jsonl").exists()
     assert (tmp_path / "data" / "JSON" / "embeddings.jsonl").exists()
 
@@ -155,7 +174,20 @@ def test_ingest_uses_settings_default_workers_and_writes_outputs(monkeypatch, tm
 def test_benchmark_writes_report_and_summary_files(monkeypatch, tmp_path):
     dataset = tmp_path / "dataset.csv"
     dataset.write_text("question\nwhat is test?\n", encoding="utf-8")
-    monkeypatch.setattr(main_module, "get_chunks", lambda question, num_chunks=5: {})
+
+    class FakeEvaluator:
+        def __init__(self, dataset, retrieval_mode, top_k, rerank, output_dir, tag):
+            self.output_dir = output_dir
+            self.tag = tag
+
+        def run(self):
+            report_path = self.output_dir / "phase1_20260305_120000_report.json"
+            summary_path = self.output_dir / "phase1_20260305_120000_summary.csv"
+            report_path.write_text("{}", encoding="utf-8")
+            summary_path.write_text("run_id\nphase1\n", encoding="utf-8")
+            return report_path, summary_path
+
+    monkeypatch.setattr(main_module, "Evaluator", FakeEvaluator)
 
     result = runner.invoke(app, ["benchmark", "--dataset", str(dataset), "--output-dir", str(tmp_path), "--tag", "phase1"])
 

@@ -3,14 +3,11 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
-import pickle
 import time
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
-import faiss
-import numpy as np
 import pandas as pd
 import requests
 import typer
@@ -22,13 +19,17 @@ from src.core.constants import FALLBACK_ANSWER
 from src.core.logging import get_logger
 from src.core.paths import find_project_root
 from src.core.schemas import Citation, EmbeddingRecord, RAGAnswer, VerificationResult
+from src.evaluation.evaluator import Evaluator
 from src.generation.generator import LLMGenerator
 from src.generation.prompt_templates import build_prompt
+from src.indexing.bm25_index import BM25Index
 from src.indexing.ollama_generator import rag_ollama_answer
-from src.indexing.retrieval import get_chunks
+from src.indexing.vector_store import FaissStore
+from src.retrieval import get_retriever
 from src.ingestion.chunker import extract_pdf_chunks, write_chunks_jsonl
 from src.ingestion.embedder import embed_chunks, load_canonical_chunks_jsonl, write_embeddings_jsonl
 from src.ingestion.legacy_loader import load_legacy_chunks_json
+from src.retrieval.reranker import Reranker
 
 app = typer.Typer(help="RAG command line interface")
 logger = get_logger(__name__)
@@ -44,41 +45,56 @@ def _canonical_paths(root: Path) -> tuple[Path, Path]:
     return json_dir / "chunks.jsonl", json_dir / "embeddings.jsonl"
 
 
-def _build_faiss_index(embeddings_path: Path) -> tuple[Path, Path, int]:
-    root = find_project_root()
-    index_path = root / "data" / "my_faiss.index"
-    text_data_path = root / "data" / "text_data.pkl"
-
-    embeddings: list[list[float]] = []
-    text_data: list[dict] = []
+def _embedding_file_model(embeddings_path: Path) -> str:
+    if not embeddings_path.exists():
+        return ""
     with embeddings_path.open("r", encoding="utf-8") as handle:
         for line in handle:
             line = line.strip()
             if not line:
                 continue
-            record = json.loads(line)
-            embeddings.append(record["embedding"])
-            text_data.append(
-                {
-                    "id": record["id"],
-                    "text": record["text"],
-                    "metadata": record.get("metadata", {}),
-                }
-            )
+            payload = json.loads(line)
+            return str(payload.get("embedding_model", ""))
+    return ""
 
-    if not embeddings:
-        raise ValueError("No embeddings to index")
 
-    vectors = np.array(embeddings, dtype="float32")
-    index = faiss.IndexFlatL2(vectors.shape[1])
-    index.add(vectors)
+def _count_jsonl_rows(path: Path) -> int:
+    if not path.exists():
+        return 0
+    with path.open("r", encoding="utf-8") as handle:
+        return sum(1 for line in handle if line.strip())
 
-    index_path.parent.mkdir(parents=True, exist_ok=True)
-    faiss.write_index(index, str(index_path))
-    with text_data_path.open("wb") as handle:
-        pickle.dump(text_data, handle)
 
-    return index_path, text_data_path, int(index.ntotal)
+def _build_search_indices(
+    chunks_path: Path,
+    embeddings_path: Path,
+    embedding_model: str,
+) -> dict[str, object]:
+    faiss_store = FaissStore(embeddings_path=embeddings_path, embedding_model=embedding_model)
+    faiss_store.build(embeddings_path)
+
+    bm25_index = BM25Index(chunks_path=chunks_path)
+    bm25_index.build()
+
+    return {
+        "faiss_index": str(faiss_store.index_path),
+        "faiss_metadata": str(faiss_store.metadata_path),
+        "text_data": str(faiss_store.text_data_path),
+        "vectors": int(faiss_store.index.ntotal) if faiss_store.index is not None else 0,
+        "bm25_index": str(bm25_index.index_path),
+        "bm25_metadata": str(bm25_index.metadata_path),
+        "bm25_rows": len(bm25_index.records),
+    }
+
+
+def _retrieve_results(question: str, top_k: int, retrieval_mode: str, rerank: bool = False) -> list[dict]:
+    retriever = get_retriever(retrieval_mode)
+    fetch_k = top_k * 3 if rerank else top_k
+    results = retriever.retrieve(question, fetch_k)
+    if not rerank:
+        return results[:top_k]
+    reranker = Reranker()
+    return reranker.rerank(question, results, top_k)
 
 
 def _discover_pdfs(source: str, path: Path | None) -> list[Path]:
@@ -166,11 +182,13 @@ def ingest(
 
     all_chunks = []
     failed_files: list[str] = []
+    generated_new_corpus = False
 
     for pdf_path in pdf_files:
         try:
             chunks = extract_pdf_chunks(pdf_path)
             all_chunks.extend(chunks)
+            generated_new_corpus = True
         except Exception as exc:
             failed_files.append(str(pdf_path))
             logger.warning("ingest_pdf_failed", file=str(pdf_path), error=str(exc))
@@ -183,50 +201,78 @@ def ingest(
             for legacy in legacy_sources:
                 if legacy.exists():
                     all_chunks.extend(load_legacy_chunks_json(legacy))
+                    generated_new_corpus = True
 
     if not all_chunks:
         logger.error("ingest_no_chunks")
         raise typer.Exit(code=2)
 
-    write_chunks_jsonl(all_chunks, chunks_path)
+    embeddings_need_rebuild = generated_new_corpus or rebuild_index or not embeddings_path.exists()
+    current_embedding_model = _embedding_file_model(embeddings_path)
+    if not embeddings_need_rebuild and current_embedding_model != settings.embedding_model:
+        embeddings_need_rebuild = True
 
-    records_for_embedding: list[dict] = []
-    for chunk in all_chunks:
-        records_for_embedding.append(
-            {
-                "id": chunk.chunk_id,
-                "text": chunk.text,
-                "metadata": {
-                    "doc_id": chunk.doc_id,
-                    "page_number": chunk.page_number,
-                    "headings": chunk.headings,
-                    "source_file": chunk.source_file,
-                    "chunk_type": chunk.chunk_type.value,
-                },
-            }
-        )
+    if generated_new_corpus or not chunks_path.exists():
+        write_chunks_jsonl(all_chunks, chunks_path)
 
-    vectors = embed_chunks(records_for_embedding, settings.embedding_model, settings.embedding_batch_size)
-    now = _now_utc()
     embedded_records: list[EmbeddingRecord] = []
-    for record, vector in zip(records_for_embedding, vectors):
-        text = record["text"]
-        embedded_records.append(
-            EmbeddingRecord(
-                id=record["id"],
-                text=text,
-                metadata=record["metadata"],
-                embedding=vector,
-                content_hash=hashlib.md5(text.encode("utf-8")).hexdigest(),
-                embedding_model=settings.embedding_model,
-                created_at=now,
+    if embeddings_need_rebuild:
+        records_for_embedding: list[dict] = []
+        for chunk in all_chunks:
+            records_for_embedding.append(
+                {
+                    "id": chunk.chunk_id,
+                    "text": chunk.text,
+                    "metadata": {
+                        "doc_id": chunk.doc_id,
+                        "page_number": chunk.page_number,
+                        "headings": chunk.headings,
+                        "source_file": chunk.source_file,
+                        "chunk_type": chunk.chunk_type.value,
+                    },
+                }
             )
-        )
 
-    write_embeddings_jsonl(embedded_records, embeddings_path)
+        vectors = embed_chunks(records_for_embedding, settings.embedding_model, settings.embedding_batch_size)
+        now = _now_utc()
+        for record, vector in zip(records_for_embedding, vectors):
+            text = record["text"]
+            embedded_records.append(
+                EmbeddingRecord(
+                    id=record["id"],
+                    text=text,
+                    metadata=record["metadata"],
+                    embedding=vector,
+                    content_hash=hashlib.md5(text.encode("utf-8")).hexdigest(),
+                    embedding_model=settings.embedding_model,
+                    created_at=now,
+                )
+            )
+
+        write_embeddings_jsonl(embedded_records, embeddings_path)
+
+    should_rebuild_indices = rebuild_index or generated_new_corpus or embeddings_need_rebuild
+    faiss_store = FaissStore(embeddings_path=embeddings_path, embedding_model=settings.embedding_model)
+    bm25_index = BM25Index(chunks_path=chunks_path)
+    if not should_rebuild_indices:
+        try:
+            should_rebuild_indices = not (faiss_store.load() and bm25_index.load())
+        except RuntimeError:
+            should_rebuild_indices = True
 
     try:
-        index_path, text_data_path, total_vectors = _build_faiss_index(embeddings_path)
+        if should_rebuild_indices:
+            index_info = _build_search_indices(chunks_path, embeddings_path, settings.embedding_model)
+        else:
+            index_info = {
+                "faiss_index": str(faiss_store.index_path),
+                "faiss_metadata": str(faiss_store.metadata_path),
+                "text_data": str(faiss_store.text_data_path),
+                "vectors": len(faiss_store.text_data),
+                "bm25_index": str(bm25_index.index_path),
+                "bm25_metadata": str(bm25_index.metadata_path),
+                "bm25_rows": len(bm25_index.records),
+            }
     except Exception as exc:
         logger.error("index_build_failed", error=str(exc))
         raise typer.Exit(code=2)
@@ -240,11 +286,17 @@ def ingest(
                 "processed_pdfs": len(pdf_files) - len(failed_files),
                 "failed_pdfs": len(failed_files),
                 "chunks_written": len(all_chunks),
-                "embeddings_written": len(embedded_records),
-                "faiss_index": str(index_path),
-                "text_data": str(text_data_path),
-                "vectors": total_vectors,
+                "embeddings_written": len(embedded_records) if embeddings_need_rebuild else _count_jsonl_rows(embeddings_path),
+                "faiss_index": index_info["faiss_index"],
+                "faiss_metadata": index_info["faiss_metadata"],
+                "text_data": index_info["text_data"],
+                "vectors": index_info["vectors"],
+                "bm25_index": index_info["bm25_index"],
+                "bm25_metadata": index_info["bm25_metadata"],
+                "bm25_rows": index_info["bm25_rows"],
                 "workers": effective_workers,
+                "rebuild_index": rebuild_index,
+                "indices_rebuilt": should_rebuild_indices,
             },
             ensure_ascii=False,
         )
@@ -268,7 +320,7 @@ def query(
 
     try:
         retrieval_start = time.perf_counter()
-        hits = get_chunks(question, num_chunks=top_k)
+        hits = _retrieve_results(question, top_k, effective_mode, rerank=rerank)
         retrieval_latency_ms = (time.perf_counter() - retrieval_start) * 1000
     except Exception as exc:
         logger.error("query_retrieval_failed", error=str(exc))
@@ -277,14 +329,13 @@ def query(
     citations: list[Citation] = []
     contexts = []
     candidate_ref_ids = []
-    for rank in sorted(hits.keys()):
-        hit = hits[rank]
-        ref_id = str(hit.get("paper", ""))
+    for hit in hits:
+        ref_id = str(hit.get("ref_id", ""))
         candidate_ref_ids.append(ref_id)
         contexts.append(
             {
                 "ref_id": ref_id,
-                "text": hit.get("chunk", ""),
+                "text": hit.get("text", ""),
                 "page": hit.get("page"),
                 "headings": hit.get("headings", []),
             }
@@ -293,8 +344,8 @@ def query(
             Citation(
                 ref_id=ref_id,
                 page=hit.get("page"),
-                evidence_text=str(hit.get("chunk", ""))[:300],
-                evidence_type="text",
+                evidence_text=str(hit.get("text", ""))[:300],
+                evidence_type=str(hit.get("chunk_type", "text")),
             )
         )
 
@@ -304,7 +355,18 @@ def query(
             if effective_llm == "ollama":
                 raw = rag_ollama_answer(
                     question,
-                    hits,
+                    {
+                        item["rank"]: {
+                            "chunk": item["text"],
+                            "paper": item["ref_id"],
+                            "rank": item["rank"],
+                            "score": item["score"],
+                            "page": item["page"],
+                            "source_file": item["source_file"],
+                            "headings": item["headings"],
+                        }
+                        for item in hits
+                    },
                     model=None,
                     ollama_url=settings.ollama_base_url,
                 )
@@ -373,21 +435,20 @@ def search(
 
     try:
         start = time.perf_counter()
-        hits = get_chunks(question, num_chunks=top_k)
+        hits = _retrieve_results(question, top_k, effective_mode, rerank=rerank)
         retrieval_latency_ms = (time.perf_counter() - start) * 1000
     except Exception as exc:
         logger.error("search_failed", error=str(exc))
         raise typer.Exit(code=1)
 
     results = []
-    for rank in sorted(hits.keys()):
-        hit = hits[rank]
+    for hit in hits:
         results.append(
             {
-                "rank": rank,
-                "ref_id": hit.get("paper", ""),
+                "rank": int(hit.get("rank", len(results) + 1)),
+                "ref_id": hit.get("ref_id", ""),
                 "score": float(hit.get("score", 0.0)),
-                "text": hit.get("chunk", ""),
+                "text": hit.get("text", ""),
                 "page": hit.get("page"),
                 "source_file": hit.get("source_file", ""),
                 "headings": hit.get("headings", []),
@@ -414,9 +475,6 @@ def search(
             )
         )
 
-    if rerank:
-        logger.info("rerank_requested_but_not_available_in_phase1", requested=True)
-
 
 @app.command()
 def benchmark(
@@ -427,56 +485,15 @@ def benchmark(
     output_dir: Path = typer.Option(Path("data/benchmark_results/"), "--output-dir", help="Directory for report output"),
     tag: str = typer.Option("run", "--tag", help="Human-readable tag for this run"),
 ) -> None:
-    settings = get_settings()
-    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-    run_id = f"{tag}_{timestamp}"
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    num_questions = 0
-    latencies = []
-    if dataset.exists():
-        df = pd.read_csv(dataset)
-        num_questions = len(df)
-        if "question" in df.columns:
-            for q in df["question"].head(min(20, num_questions)).tolist():
-                start = time.perf_counter()
-                try:
-                    get_chunks(str(q), num_chunks=top_k)
-                    latencies.append((time.perf_counter() - start) * 1000)
-                except Exception:
-                    latencies.append((time.perf_counter() - start) * 1000)
-
-    mean_latency = float(np.mean(latencies)) if latencies else 0.0
-    p95_latency = float(np.percentile(latencies, 95)) if latencies else 0.0
-
-    report = {
-        "run_id": run_id,
-        "tag": tag,
-        "timestamp": _now_utc(),
-        "config_hash": hashlib.md5(f"{retrieval_mode}:{top_k}:{rerank}".encode("utf-8")).hexdigest(),
-        "git_commit": "",
-        "dataset": str(dataset),
-        "retrieval_mode": retrieval_mode,
-        "top_k": top_k,
-        "reranker_enabled": rerank,
-        "embedding_model": settings.embedding_model,
-        "num_questions": num_questions,
-        "recall_at_k": 0.0,
-        "mrr": 0.0,
-        "ndcg_at_k": 0.0,
-        "mean_retrieval_latency_ms": round(mean_latency, 3),
-        "p95_retrieval_latency_ms": round(p95_latency, 3),
-        "per_question": [],
-    }
-
-    report_path = output_dir / f"{run_id}_report.json"
-    summary_path = output_dir / f"{run_id}_summary.csv"
-    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    with summary_path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.writer(handle)
-        writer.writerow(["run_id", "retrieval_mode", "top_k", "rerank", "mean_retrieval_latency_ms", "p95_retrieval_latency_ms"])
-        writer.writerow([run_id, retrieval_mode, top_k, int(rerank), round(mean_latency, 3), round(p95_latency, 3)])
-
+    evaluator = Evaluator(
+        dataset=dataset,
+        retrieval_mode=retrieval_mode,
+        top_k=top_k,
+        rerank=rerank,
+        output_dir=output_dir,
+        tag=tag,
+    )
+    report_path, summary_path = evaluator.run()
     typer.echo(json.dumps({"report": str(report_path), "summary": str(summary_path)}, ensure_ascii=False))
 
 
