@@ -1,27 +1,32 @@
-"""RAG pipeline: retrieval, prompt, generation, packaging."""
+"""RAG pipeline orchestration for retrieval, generation, and normalization."""
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any
 
 from src.config.settings import get_settings
 from src.core.constants import FALLBACK_ANSWER
 from src.core.logging import get_logger
 from src.core.paths import find_project_root
-try:
-    from src.indexing.retrieval import get_chunks as retrieval_get_chunks  # type: ignore
-except Exception:
-    retrieval_get_chunks = None  # type: ignore
-from src.generation.generator import LLMGenerator
+from src.core.schemas import Citation, RAGAnswer
+from src.generation.llm_client import (
+    create_llm_client,
+    fallback_generation_payload,
+    normalize_generation_payload,
+    parse_json_response,
+)
 from src.generation.prompt_templates import build_prompt
+from src.generation.verifier import Verifier
+from src.retrieval import get_retriever
+from src.retrieval.reranker import Reranker
 
 logger = get_logger(__name__)
 
 
 def _to_str_field(value: Any) -> str:
-    """Coerce list-like fields to a single string for CSV."""
     if value is None:
         return ""
     if isinstance(value, list):
@@ -30,105 +35,105 @@ def _to_str_field(value: Any) -> str:
     return str(value).strip()
 
 
-def _format_list_py(items: List[str]) -> str:
-    """Format as a Python-style list of quoted strings (train_QA style)."""
+def _format_list_py(items: list[str]) -> str:
     safe = [str(x).strip() for x in items if x]
     inner = ",".join([f"'{x}'" for x in safe])
     return f"[{inner}]"
 
 
-def _load_metadata_map(root: Path) -> Dict[str, Dict[str, str]]:
-    """
-    Load metadata.csv and return a mapping of ref_id -> {url, title, citation}.
-    """
+def _load_metadata_map(root: Path) -> dict[str, dict[str, str]]:
     import csv
 
     meta_path = root / "data" / "metadata" / "metadata.csv"
-    m: Dict[str, Dict[str, str]] = {}
-    with meta_path.open("r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
+    metadata: dict[str, dict[str, str]] = {}
+    if not meta_path.exists():
+        return metadata
+
+    with meta_path.open("r", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
         for row in reader:
-            rid = row.get("id")
-            if not rid:
+            ref_id = row.get("id")
+            if not ref_id:
                 continue
-            m[rid] = {
+            metadata[ref_id] = {
                 "url": row.get("url", ""),
                 "title": row.get("title", ""),
                 "citation": row.get("citation", ""),
             }
-    return m
+    return metadata
 
 
 def _normalize_ref_id(raw: Any) -> str:
-    """Strip chunk-level suffixes so metadata IDs match."""
     if raw is None:
         return ""
     text = str(raw).strip()
     if not text:
         return ""
-    if "_" in text:
-        return text.split("_", 1)[0]
-    return text
+    return text.split("_", 1)[0] if "_" in text else text
 
 
-def _infer_ref_id(record: Dict[str, Any]) -> str:
-    """Infer the reference id from the chunk record."""
-    md = record.get("metadata", {}) or {}
-    src = md.get("source_file") or md.get("source")
-    if isinstance(src, str) and src.endswith(".pdf"):
-        return _normalize_ref_id(Path(src).stem)
-    # fallback: prefix before first underscore of chunk id
-    rec_id = record.get("id", "")
-    if isinstance(rec_id, str) and "_" in rec_id:
-        return _normalize_ref_id(rec_id.split("_", 1)[0])
-    return _normalize_ref_id(rec_id)
-
-
-def _build_contexts(records: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[str]]:
-    contexts: List[Dict[str, Any]] = []
-    ref_ids: List[str] = []
-    for r in records:
-        # Prefer explicit ref_id if supplied (e.g., from retriever)
-        rid = _normalize_ref_id(r.get("ref_id") or _infer_ref_id(r))
-        ref_ids.append(rid)
-        md = r.get("metadata", {}) or {}
-        contexts.append(
-            {
-                "ref_id": rid,
-                "text": r.get("text", ""),
-                "page": md.get("page_number") or md.get("page"),
-                "headings": md.get("headings"),
-            }
+def _backfill_citations(contexts: list[dict[str, Any]], max_items: int = 3) -> list[Citation]:
+    citations: list[Citation] = []
+    for context in contexts[:max_items]:
+        evidence_text = str(context.get("text", "")).strip()
+        if not evidence_text:
+            continue
+        citations.append(
+            Citation(
+                ref_id=str(context.get("ref_id", "")),
+                page=context.get("page"),
+                evidence_text=evidence_text[:300],
+                evidence_type=str(context.get("chunk_type", "text") or "text"),
+            )
         )
-    # dedupe while preserving order
-    seen = set()
-    unique_ref_ids = []
-    for rid in ref_ids:
-        if rid and rid not in seen:
-            seen.add(rid)
-            unique_ref_ids.append(rid)
-    return contexts, unique_ref_ids
+    return citations
 
 
-def _normalize_output(raw: Dict[str, Any], contexts: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """
-    Ensure the model output complies with submission rules. If missing evidence
-    or answer looks ungrounded, set fallback.
-    """
-    # Safely convert 'answer' to string before stripping
-    ans = str(raw.get("answer", "")).strip()
+def _normalize_citations(raw_citations: Any, contexts: list[dict[str, Any]]) -> list[Citation]:
+    if not isinstance(raw_citations, list):
+        return _backfill_citations(contexts)
 
-    val = raw.get("answer_value")
-    unit = (raw.get("answer_unit") or "").strip() or "is_blank"
-    ref_ids = raw.get("ref_id") or []
-    if isinstance(ref_ids, str):
-        ref_ids = [ref_ids]
-    ref_ids = [_normalize_ref_id(r) for r in ref_ids if r]
-    supp = _to_str_field(raw.get("supporting_materials"))
-    expl = _to_str_field(raw.get("explanation"))
+    allowed_ref_ids = {str(context.get("ref_id", "")) for context in contexts if context.get("ref_id")}
+    normalized: list[Citation] = []
+    for item in raw_citations:
+        if not isinstance(item, dict):
+            continue
+        ref_id = _normalize_ref_id(item.get("ref_id"))
+        if not ref_id or (allowed_ref_ids and ref_id not in allowed_ref_ids):
+            continue
 
-    # If empty answer or explicit fallback → fallback
-    if (not ans) or ans == FALLBACK_ANSWER:
+        page = item.get("page")
+        if page is not None:
+            try:
+                page = int(page)
+            except (TypeError, ValueError):
+                page = None
+
+        evidence_text = str(item.get("evidence_text", "")).strip()
+        if not evidence_text:
+            context = next((entry for entry in contexts if entry.get("ref_id") == ref_id), None)
+            evidence_text = str(context.get("text", "")).strip()[:300] if context else ""
+        if not evidence_text:
+            continue
+
+        evidence_type = str(item.get("evidence_type", "text") or "text")
+        normalized.append(
+            Citation(
+                ref_id=ref_id,
+                page=page,
+                evidence_text=evidence_text[:300],
+                evidence_type=evidence_type,
+            )
+        )
+
+    return normalized or _backfill_citations(contexts)
+
+
+def _normalize_answer_payload(raw: dict[str, Any], contexts: list[dict[str, Any]]) -> dict[str, Any]:
+    payload = normalize_generation_payload(raw)
+    answer_text = str(payload.get("answer", "") or "").strip()
+
+    if not answer_text or answer_text == FALLBACK_ANSWER:
         return {
             "answer": FALLBACK_ANSWER,
             "answer_value": "is_blank",
@@ -136,143 +141,192 @@ def _normalize_output(raw: Dict[str, Any], contexts: List[Dict[str, Any]]) -> Di
             "ref_id": [],
             "supporting_materials": "is_blank",
             "explanation": "is_blank",
+            "citations": [],
         }
 
-    # If model forgot ref_ids but we have contexts, backfill from them
-    if not ref_ids and contexts:
-        ref_ids = [c.get("ref_id") for c in contexts if c.get("ref_id")]
-        # keep 1-3 refs max
-        ref_ids = list(dict.fromkeys(ref_ids))[:3]
-        if not supp:
-            supp = contexts[0].get("text", "")[:300]
-        if not expl:
-            expl = "Answer grounded in retrieved context; refs inferred from top results."
+    citations = _normalize_citations(payload.get("citations"), contexts)
 
-    # Minimal backfill for missing supporting materials
-    if not supp and contexts:
-        supp = contexts[0].get("text", "")[:300]
+    ref_ids = payload.get("ref_id", [])
+    if isinstance(ref_ids, str):
+        ref_ids = [ref_ids]
+    if not isinstance(ref_ids, list):
+        ref_ids = []
 
-    # Normalize booleans
-    if ans.upper() in ("TRUE", "FALSE"):
-        val = 1 if ans.upper() == "TRUE" else 0
-        unit = "is_blank"
+    normalized_ref_ids = [_normalize_ref_id(ref_id) for ref_id in ref_ids if ref_id]
+    if not normalized_ref_ids:
+        normalized_ref_ids = [citation.ref_id for citation in citations]
+    if not normalized_ref_ids:
+        normalized_ref_ids = [str(context.get("ref_id", "")) for context in contexts if context.get("ref_id")]
 
-    # If answer_value is still empty, use categorical default
-    if val in (None, ""):
-        val = ans
-        if unit == "is_blank":
-            unit = "is_blank"
+    normalized_ref_ids = list(dict.fromkeys([ref_id for ref_id in normalized_ref_ids if ref_id]))[:3]
+    supporting_materials = _to_str_field(payload.get("supporting_materials"))
+    if not supporting_materials and citations:
+        supporting_materials = citations[0].evidence_text
+
+    explanation = _to_str_field(payload.get("explanation"))
+    if not explanation and citations:
+        explanation = "Answer grounded in the cited evidence spans."
+
+    answer_value = payload.get("answer_value", "is_blank")
+    if isinstance(answer_value, list):
+        answer_value = json.dumps(answer_value, ensure_ascii=False)
+    if answer_value in (None, ""):
+        answer_value = answer_text
+
+    answer_unit = str(payload.get("answer_unit", "is_blank") or "is_blank")
+    if answer_text.upper() in {"TRUE", "FALSE"}:
+        answer_value = "1" if answer_text.upper() == "TRUE" else "0"
+        answer_unit = "is_blank"
 
     return {
-        "answer": ans,
-        "answer_value": val,
-        "answer_unit": unit,
-        "ref_id": ref_ids,
-        "supporting_materials": supp,
-        "explanation": expl,
+        "answer": answer_text,
+        "answer_value": str(answer_value),
+        "answer_unit": answer_unit,
+        "ref_id": normalized_ref_ids,
+        "supporting_materials": supporting_materials or "is_blank",
+        "explanation": explanation or "is_blank",
+        "citations": citations,
     }
+
+
+def _retrieve_results(question: str, top_k: int, retrieval_mode: str, rerank: bool) -> list[dict[str, Any]]:
+    retriever = get_retriever(retrieval_mode)
+    fetch_k = top_k * 3 if rerank else top_k
+    results = retriever.retrieve(question, fetch_k)
+    if not rerank:
+        return results[:top_k]
+    reranker = Reranker()
+    return reranker.rerank(question, results, top_k)
+
+
+def _build_contexts(hits: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[str]]:
+    contexts: list[dict[str, Any]] = []
+    candidate_ref_ids: list[str] = []
+    for hit in hits:
+        ref_id = _normalize_ref_id(hit.get("ref_id"))
+        if ref_id:
+            candidate_ref_ids.append(ref_id)
+        contexts.append(
+            {
+                "ref_id": ref_id,
+                "text": str(hit.get("text", "")),
+                "page": hit.get("page"),
+                "headings": list(hit.get("headings", []) or []),
+                "chunk_type": str(hit.get("chunk_type", "text") or "text"),
+            }
+        )
+
+    deduped_ref_ids = list(dict.fromkeys([ref_id for ref_id in candidate_ref_ids if ref_id]))
+    return contexts, deduped_ref_ids
 
 
 @dataclass
 class RAGConfig:
     top_k: int | None = None
-    model_name: str | None = None
-    project: str | None = None
-    location: str | None = None
-    credentials_path: str | None = None
+    retrieval_mode: str | None = None
+    rerank: bool | None = None
+    llm_backend: str | None = None
 
     @classmethod
     def from_settings(cls) -> "RAGConfig":
         settings = get_settings()
         return cls(
             top_k=settings.retrieval_top_k,
-            model_name=settings.gemini_model,
-            project=settings.gcp_project,
-            location=settings.gcp_location,
-            credentials_path=settings.gcp_credentials_path,
+            retrieval_mode=settings.retrieval_mode,
+            rerank=True,
+            llm_backend=settings.llm_backend,
         )
 
     def __post_init__(self) -> None:
         settings = get_settings()
         if self.top_k is None:
             self.top_k = settings.retrieval_top_k
-        if self.model_name is None:
-            self.model_name = settings.gemini_model
-        if self.project is None:
-            self.project = settings.gcp_project
-        if self.location is None:
-            self.location = settings.gcp_location
-        if self.credentials_path is None:
-            self.credentials_path = settings.gcp_credentials_path
+        if self.retrieval_mode is None:
+            self.retrieval_mode = settings.retrieval_mode
+        if self.rerank is None:
+            self.rerank = True
+        if self.llm_backend is None:
+            self.llm_backend = settings.llm_backend
 
 
 class RAGPipeline:
     def __init__(self, config: RAGConfig | None = None) -> None:
         self.config = config or RAGConfig.from_settings()
-        # Paths
         self.root = find_project_root()
-        self.data_dir = self.root / "data"
-        
-        # LLM
-        self.generator = LLMGenerator(
-            model=self.config.model_name,
-            project=self.config.project,
-            location=self.config.location,
-            credentials_path=self.config.credentials_path,
+        self.meta_map = _load_metadata_map(self.root)
+        self.verifier = Verifier()
+
+    def answer_question(
+        self,
+        question: str,
+        *,
+        top_k: int | None = None,
+        retrieval_mode: str | None = None,
+        rerank: bool | None = None,
+        llm_backend: str | None = None,
+    ) -> RAGAnswer:
+        effective_top_k = top_k or self.config.top_k or 5
+        effective_mode = retrieval_mode or self.config.retrieval_mode or "hybrid"
+        effective_rerank = self.config.rerank if rerank is None else rerank
+        effective_llm = llm_backend or self.config.llm_backend or "gemini"
+
+        retrieval_start = time.perf_counter()
+        hits = _retrieve_results(question, effective_top_k, effective_mode, effective_rerank)
+        retrieval_latency_ms = (time.perf_counter() - retrieval_start) * 1000
+
+        contexts, candidate_ref_ids = _build_contexts(hits)
+
+        generation_start = time.perf_counter()
+        if contexts:
+            prompt = build_prompt(question, contexts, candidate_ref_ids)
+            client = create_llm_client(effective_llm)
+            raw_text = client.generate(prompt)
+            raw_payload = parse_json_response(raw_text) or fallback_generation_payload()
+        else:
+            raw_payload = fallback_generation_payload()
+        generation_latency_ms = (time.perf_counter() - generation_start) * 1000
+
+        normalized = _normalize_answer_payload(raw_payload, contexts)
+        answer = RAGAnswer(
+            answer=normalized["answer"],
+            answer_value=normalized["answer_value"],
+            answer_unit=normalized["answer_unit"],
+            ref_id=normalized["ref_id"],
+            supporting_materials=normalized["supporting_materials"],
+            explanation=normalized["explanation"],
+            citations=normalized["citations"],
+            retrieval_latency_ms=round(retrieval_latency_ms, 3),
+            generation_latency_ms=round(generation_latency_ms, 3),
+            retrieval_mode=effective_mode,
+            llm_backend=effective_llm,
+            verification=None,
         )
 
-        # Metadata
-        self.meta_map = _load_metadata_map(self.root)
-
-    def answer(self, qid: str, question: str) -> Dict[str, Any]:
-        recs: List[Dict[str, Any]] = []
-        if retrieval_get_chunks is None:
-            logger.info("Error: retrieval function not found (src/indexing/retrieval.get_chunks). Proceeding without context; answers will fallback.")
+        verification = self.verifier.verify(answer, contexts)
+        if verification.corrected_output:
+            corrected_payload = answer.model_dump()
+            corrected_payload.update(verification.corrected_output)
+            answer = RAGAnswer(**corrected_payload, verification=verification)
         else:
-            try:
-                res = retrieval_get_chunks(question, num_chunks=self.config.top_k)
-                for rank in sorted(res.keys()):
-                    item = res[rank]
-                    recs.append(
-                        {
-                            "ref_id": _normalize_ref_id(item.get("paper", "")),
-                            "text": item.get("chunk", ""),
-                            # page/headings unknown here; leave absent
-                        }
-                    )
-            except Exception as e:
-                logger.info(f"Error: retrieval_get_chunks failed; proceeding without context. Details: {e}")
-        contexts, candidate_ref_ids = _build_contexts(recs)
+            answer = answer.model_copy(update={"verification": verification})
 
-        # Prompt and generate
-        prompt = build_prompt(question, contexts, candidate_ref_ids)
-        raw = self.generator.generate_json(prompt)
-        norm = _normalize_output(raw, contexts)
+        return answer
 
-        # Compute URLs for citations
-        ref_ids: List[str] = norm.get("ref_id", [])
-        ref_urls = [self.meta_map.get(r, {}).get("url", "") for r in ref_ids]
+    def answer(self, qid: str, question: str) -> dict[str, Any]:
+        answer = self.answer_question(question)
 
-        # Format list fields in Python-style for CSV compatibility
-        ref_id_str = _format_list_py(ref_ids) if ref_ids else "is_blank"
-        ref_url_str = _format_list_py([u for u in ref_urls if u]) if ref_urls and any(ref_urls) else "is_blank"
+        ref_urls = [self.meta_map.get(ref_id, {}).get("url", "") for ref_id in answer.ref_id]
+        ref_id_str = _format_list_py(answer.ref_id) if answer.ref_id else "is_blank"
+        ref_url_str = _format_list_py([url for url in ref_urls if url]) if any(ref_urls) else "is_blank"
 
-        # answer_value should be JSON-like for ranges; ensure string for CSV
-        av = norm.get("answer_value")
-        if isinstance(av, list):
-            answer_value = json.dumps(av)
-        else:
-            answer_value = str(av)
-
-        record = {
+        return {
             "id": qid,
             "question": question,
-            "answer": norm.get("answer", FALLBACK_ANSWER),
-            "answer_value": answer_value,
-            "answer_unit": norm.get("answer_unit", "is_blank"),
+            "answer": answer.answer,
+            "answer_value": answer.answer_value,
+            "answer_unit": answer.answer_unit,
             "ref_id": ref_id_str,
             "ref_url": ref_url_str,
-            "supporting_materials": norm.get("supporting_materials", "is_blank"),
-            "explanation": norm.get("explanation", "is_blank"),
+            "supporting_materials": answer.supporting_materials,
+            "explanation": answer.explanation,
         }
-        return record

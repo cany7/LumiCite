@@ -3,9 +3,13 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import os
 import time
+import uuid
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 import pandas as pd
@@ -15,20 +19,20 @@ import uvicorn
 from fastapi import FastAPI
 
 from src.config.settings import get_settings
-from src.core.constants import FALLBACK_ANSWER
 from src.core.logging import get_logger
 from src.core.paths import find_project_root
-from src.core.schemas import Citation, EmbeddingRecord, RAGAnswer, VerificationResult
+from src.core.schemas import EmbeddingRecord, TextChunk
 from src.evaluation.evaluator import Evaluator
-from src.generation.generator import LLMGenerator
-from src.generation.prompt_templates import build_prompt
+from src.generation.rag_pipeline import RAGConfig, RAGPipeline
 from src.indexing.bm25_index import BM25Index
-from src.indexing.ollama_generator import rag_ollama_answer
 from src.indexing.vector_store import FaissStore
-from src.retrieval import get_retriever
+from src.ingestion.manifest import Manifest
+from src.ingestion.sources import create_source
+from src.ingestion.sources.base import DocumentMeta
 from src.ingestion.chunker import extract_pdf_chunks, write_chunks_jsonl
 from src.ingestion.embedder import embed_chunks, load_canonical_chunks_jsonl, write_embeddings_jsonl
 from src.ingestion.legacy_loader import load_legacy_chunks_json
+from src.retrieval import get_retriever
 from src.retrieval.reranker import Reranker
 
 app = typer.Typer(help="RAG command line interface")
@@ -97,6 +101,143 @@ def _retrieve_results(question: str, top_k: int, retrieval_mode: str, rerank: bo
     return reranker.rerank(question, results, top_k)
 
 
+def _chunk_strategy() -> str:
+    settings = get_settings()
+    return f"hybrid_{settings.chunk_size}_{settings.chunk_overlap}"
+
+
+def _load_existing_chunks(root: Path, chunks_path: Path) -> list[Any]:
+    if chunks_path.exists():
+        return load_canonical_chunks_jsonl(chunks_path)
+
+    chunks: list[Any] = []
+    legacy_sources = [root / "data" / "JSON" / "chunks.json", root / "data" / "JSON" / "alt_text.json"]
+    for legacy in legacy_sources:
+        if legacy.exists():
+            chunks.extend(load_legacy_chunks_json(legacy))
+    return chunks
+
+
+def _group_chunks_by_doc(chunks: list[Any]) -> dict[str, list[Any]]:
+    grouped: dict[str, list[Any]] = {}
+    for chunk in chunks:
+        grouped.setdefault(chunk.doc_id, []).append(chunk)
+    return grouped
+
+
+def _seed_manifest_from_existing_corpus(
+    manifest: Manifest,
+    documents: list[DocumentMeta],
+    chunks_by_doc: dict[str, list[Any]],
+    pdf_dir: Path,
+    *,
+    chunk_strategy: str,
+    embedding_model: str,
+) -> int:
+    if manifest.entries:
+        return 0
+
+    seeded = 0
+    for doc in documents:
+        existing_chunks = chunks_by_doc.get(doc.doc_id)
+        if not existing_chunks:
+            continue
+
+        pdf_path = doc.local_path or doc.candidate_path(pdf_dir)
+        if not pdf_path.exists():
+            continue
+
+        decision = manifest.should_process(
+            doc.doc_id,
+            pdf_path,
+            chunk_strategy=chunk_strategy,
+            embedding_model=embedding_model,
+        )
+        manifest.set_complete(
+            doc.doc_id,
+            content_hash=decision.content_hash,
+            file_size_bytes=decision.file_size_bytes,
+            chunk_strategy=chunk_strategy,
+            num_chunks=len(existing_chunks),
+            embedding_model=embedding_model,
+        )
+        seeded += 1
+
+    if seeded:
+        manifest.save()
+    return seeded
+
+
+def _records_for_embedding(chunks: list[Any]) -> list[dict[str, Any]]:
+    return [
+        {
+            "id": chunk.chunk_id,
+            "text": chunk.text,
+            "metadata": {
+                "doc_id": chunk.doc_id,
+                "page_number": chunk.page_number,
+                "headings": chunk.headings,
+                "source_file": chunk.source_file,
+                "chunk_type": chunk.chunk_type.value,
+            },
+        }
+        for chunk in chunks
+    ]
+
+
+def _extract_pdf_worker(pdf_path_str: str) -> tuple[str, list[Any], str | None]:
+    simulate_ms = int(os.environ.get("RAG_INGEST_SIMULATE_MS", "0") or "0")
+    if simulate_ms > 0:
+        time.sleep(simulate_ms / 1000)
+        pdf_path = Path(pdf_path_str)
+        doc_id = pdf_path.stem or "simulated"
+        return (
+            pdf_path_str,
+            [
+                TextChunk(
+                    chunk_id=f"{doc_id}_{uuid.uuid4().hex[:8]}",
+                    doc_id=doc_id,
+                    text=f"Simulated chunk for {doc_id}",
+                    source_file=pdf_path.name,
+                )
+            ],
+            None,
+        )
+
+    try:
+        chunks = extract_pdf_chunks(pdf_path_str)
+        return pdf_path_str, chunks, None
+    except Exception as exc:  # pragma: no cover - exercised via integration path
+        return pdf_path_str, [], str(exc)
+
+
+def _extract_chunks_for_paths(pdf_paths: list[Path], workers: int) -> tuple[dict[str, list[Any]], dict[str, str]]:
+    if not pdf_paths:
+        return {}, {}
+
+    chunk_results: dict[str, list[Any]] = {}
+    errors: dict[str, str] = {}
+    if workers <= 1 or len(pdf_paths) == 1:
+        for pdf_path in pdf_paths:
+            path_str, chunks, error = _extract_pdf_worker(str(pdf_path))
+            if error is not None:
+                errors[path_str] = error
+            else:
+                chunk_results[path_str] = chunks
+        return chunk_results, errors
+
+    with ProcessPoolExecutor(max_workers=workers) as executor:
+        futures = [executor.submit(_extract_pdf_worker, str(pdf_path)) for pdf_path in pdf_paths]
+        for future in as_completed(futures):
+            path_str, chunks, error = future.result()
+            if error is not None:
+                errors[path_str] = error
+            else:
+                chunk_results[path_str] = chunks
+
+    return chunk_results, errors
+
+
 def _discover_pdfs(source: str, path: Path | None) -> list[Path]:
     root = find_project_root()
 
@@ -156,9 +297,13 @@ def ingest(
     root = find_project_root()
     chunks_path, embeddings_path = _canonical_paths(root)
     effective_workers = workers if workers is not None else settings.ingest_workers
+    chunk_strategy = _chunk_strategy()
+    pdf_dir = root / "data" / "pdfs"
+    pdf_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        pdf_files = _discover_pdfs(source, path)
+        source_impl = create_source(source, path)
+        documents = source_impl.discover()
     except Exception as exc:
         logger.error("ingest_discovery_failed", error=str(exc))
         raise typer.Exit(code=2)
@@ -167,46 +312,99 @@ def ingest(
         typer.echo(
             json.dumps(
                 {
+                    "event": "ingest_dry_run",
                     "source": source,
                     "path": str(path) if path else "",
                     "workers": effective_workers,
                     "retry_failed": retry_failed,
                     "rebuild_index": rebuild_index,
-                    "discovered": len(pdf_files),
-                    "files": [str(p) for p in pdf_files],
+                    "discovered": len(documents),
+                    "files": [str(doc.candidate_path(pdf_dir)) for doc in documents],
                 },
                 ensure_ascii=False,
             )
         )
         return
 
-    all_chunks = []
+    manifest = Manifest(root / "data" / "manifest.json")
+    existing_chunks = _load_existing_chunks(root, chunks_path)
+    chunks_by_doc = _group_chunks_by_doc(existing_chunks)
+    seeded_count = _seed_manifest_from_existing_corpus(
+        manifest,
+        documents,
+        chunks_by_doc,
+        pdf_dir,
+        chunk_strategy=chunk_strategy,
+        embedding_model=settings.embedding_model,
+    )
+    if seeded_count:
+        logger.info("manifest_bootstrapped", count=seeded_count, path=str(manifest.path))
+
     failed_files: list[str] = []
-    generated_new_corpus = False
+    processed_doc_ids: set[str] = set()
+    skipped_docs = 0
 
-    for pdf_path in pdf_files:
+    planned_jobs: list[tuple[DocumentMeta, Path, Any]] = []
+    for doc in documents:
         try:
-            chunks = extract_pdf_chunks(pdf_path)
-            all_chunks.extend(chunks)
-            generated_new_corpus = True
+            pdf_path = source_impl.fetch(doc, pdf_dir)
+            decision = manifest.should_process(
+                doc.doc_id,
+                pdf_path,
+                chunk_strategy=chunk_strategy,
+                embedding_model=settings.embedding_model,
+                retry_failed_only=retry_failed,
+            )
         except Exception as exc:
-            failed_files.append(str(pdf_path))
-            logger.warning("ingest_pdf_failed", file=str(pdf_path), error=str(exc))
+            failed_files.append(doc.doc_id)
+            logger.warning("ingest_fetch_failed", doc_id=doc.doc_id, error=str(exc))
+            continue
 
-    if not all_chunks:
-        if chunks_path.exists() and not rebuild_index:
-            all_chunks = load_canonical_chunks_jsonl(chunks_path)
-        else:
-            legacy_sources = [root / "data" / "JSON" / "chunks.json", root / "data" / "JSON" / "alt_text.json"]
-            for legacy in legacy_sources:
-                if legacy.exists():
-                    all_chunks.extend(load_legacy_chunks_json(legacy))
-                    generated_new_corpus = True
+        if not decision.should_process:
+            skipped_docs += 1
+            logger.info("ingest_skipped", doc_id=doc.doc_id, action=decision.action)
+            continue
+
+        planned_jobs.append((doc, pdf_path, decision))
+
+    chunk_results, chunk_errors = _extract_chunks_for_paths(
+        [pdf_path for _, pdf_path, _ in planned_jobs],
+        effective_workers,
+    )
+    for doc, pdf_path, decision in planned_jobs:
+        error = chunk_errors.get(str(pdf_path))
+        if error is not None:
+            failed_files.append(str(pdf_path))
+            manifest.set_failed(
+                doc.doc_id,
+                content_hash=decision.content_hash,
+                file_size_bytes=decision.file_size_bytes,
+                chunk_strategy=chunk_strategy,
+                embedding_model=settings.embedding_model,
+                error_message=error,
+            )
+            logger.warning("ingest_pdf_failed", file=str(pdf_path), error=error)
+            continue
+
+        chunks = chunk_results.get(str(pdf_path), [])
+        chunks_by_doc[doc.doc_id] = chunks
+        processed_doc_ids.add(doc.doc_id)
+        manifest.set_complete(
+            doc.doc_id,
+            content_hash=decision.content_hash,
+            file_size_bytes=decision.file_size_bytes,
+            chunk_strategy=chunk_strategy,
+            num_chunks=len(chunks),
+            embedding_model=settings.embedding_model,
+        )
+
+    all_chunks = [chunk for doc_id in sorted(chunks_by_doc) for chunk in chunks_by_doc[doc_id]]
 
     if not all_chunks:
         logger.error("ingest_no_chunks")
         raise typer.Exit(code=2)
 
+    generated_new_corpus = bool(processed_doc_ids) or not chunks_path.exists()
     embeddings_need_rebuild = generated_new_corpus or rebuild_index or not embeddings_path.exists()
     current_embedding_model = _embedding_file_model(embeddings_path)
     if not embeddings_need_rebuild and current_embedding_model != settings.embedding_model:
@@ -217,22 +415,7 @@ def ingest(
 
     embedded_records: list[EmbeddingRecord] = []
     if embeddings_need_rebuild:
-        records_for_embedding: list[dict] = []
-        for chunk in all_chunks:
-            records_for_embedding.append(
-                {
-                    "id": chunk.chunk_id,
-                    "text": chunk.text,
-                    "metadata": {
-                        "doc_id": chunk.doc_id,
-                        "page_number": chunk.page_number,
-                        "headings": chunk.headings,
-                        "source_file": chunk.source_file,
-                        "chunk_type": chunk.chunk_type.value,
-                    },
-                }
-            )
-
+        records_for_embedding = _records_for_embedding(all_chunks)
         vectors = embed_chunks(records_for_embedding, settings.embedding_model, settings.embedding_batch_size)
         now = _now_utc()
         for record, vector in zip(records_for_embedding, vectors):
@@ -250,6 +433,21 @@ def ingest(
             )
 
         write_embeddings_jsonl(embedded_records, embeddings_path)
+        for doc_id, entry in list(manifest.entries.items()):
+            if entry.status != "complete":
+                continue
+            manifest.set_complete(
+                doc_id,
+                content_hash=entry.content_hash,
+                file_size_bytes=entry.file_size_bytes,
+                chunk_strategy=entry.chunk_strategy,
+                num_chunks=entry.num_chunks,
+                embedding_model=settings.embedding_model,
+                parsed_at=entry.parsed_at,
+                embedded_at=now,
+            )
+
+    manifest.save()
 
     should_rebuild_indices = rebuild_index or generated_new_corpus or embeddings_need_rebuild
     faiss_store = FaissStore(embeddings_path=embeddings_path, embedding_model=settings.embedding_model)
@@ -281,10 +479,12 @@ def ingest(
     typer.echo(
         json.dumps(
             {
+                "event": "ingest_summary",
                 "status": "ok" if status_code == 0 else "partial",
                 "source": source,
-                "processed_pdfs": len(pdf_files) - len(failed_files),
+                "processed_pdfs": len(processed_doc_ids),
                 "failed_pdfs": len(failed_files),
+                "skipped_pdfs": skipped_docs,
                 "chunks_written": len(all_chunks),
                 "embeddings_written": len(embedded_records) if embeddings_need_rebuild else _count_jsonl_rows(embeddings_path),
                 "faiss_index": index_info["faiss_index"],
@@ -315,104 +515,25 @@ def query(
     output: Path | None = typer.Option(None, "--output", help="Write JSON answer to file instead of stdout"),
 ) -> None:
     settings = get_settings()
-    effective_mode = retrieval_mode or settings.retrieval_mode
-    effective_llm = llm or settings.llm_backend
-
     try:
-        retrieval_start = time.perf_counter()
-        hits = _retrieve_results(question, top_k, effective_mode, rerank=rerank)
-        retrieval_latency_ms = (time.perf_counter() - retrieval_start) * 1000
-    except Exception as exc:
-        logger.error("query_retrieval_failed", error=str(exc))
-        raise typer.Exit(code=1)
-
-    citations: list[Citation] = []
-    contexts = []
-    candidate_ref_ids = []
-    for hit in hits:
-        ref_id = str(hit.get("ref_id", ""))
-        candidate_ref_ids.append(ref_id)
-        contexts.append(
-            {
-                "ref_id": ref_id,
-                "text": hit.get("text", ""),
-                "page": hit.get("page"),
-                "headings": hit.get("headings", []),
-            }
-        )
-        citations.append(
-            Citation(
-                ref_id=ref_id,
-                page=hit.get("page"),
-                evidence_text=str(hit.get("text", ""))[:300],
-                evidence_type=str(hit.get("chunk_type", "text")),
+        pipeline = RAGPipeline(
+            config=RAGConfig(
+                top_k=top_k,
+                retrieval_mode=retrieval_mode or settings.retrieval_mode,
+                rerank=rerank,
+                llm_backend=llm or settings.llm_backend,
             )
         )
-
-    generation_start = time.perf_counter()
-    try:
-        if contexts:
-            if effective_llm == "ollama":
-                raw = rag_ollama_answer(
-                    question,
-                    {
-                        item["rank"]: {
-                            "chunk": item["text"],
-                            "paper": item["ref_id"],
-                            "rank": item["rank"],
-                            "score": item["score"],
-                            "page": item["page"],
-                            "source_file": item["source_file"],
-                            "headings": item["headings"],
-                        }
-                        for item in hits
-                    },
-                    model=None,
-                    ollama_url=settings.ollama_base_url,
-                )
-            else:
-                prompt = build_prompt(question, contexts, candidate_ref_ids)
-                llm_client = LLMGenerator(
-                    model=settings.gemini_model,
-                    project=settings.gcp_project,
-                    location=settings.gcp_location,
-                    credentials_path=settings.gcp_credentials_path,
-                )
-                raw = llm_client.generate_json(prompt)
-        else:
-            raw = {
-                "answer": FALLBACK_ANSWER,
-                "answer_value": "is_blank",
-                "answer_unit": "is_blank",
-                "ref_id": [],
-                "supporting_materials": "is_blank",
-                "explanation": "is_blank",
-            }
+        answer = pipeline.answer_question(
+            question,
+            top_k=top_k,
+            retrieval_mode=retrieval_mode or settings.retrieval_mode,
+            rerank=rerank,
+            llm_backend=llm or settings.llm_backend,
+        )
     except Exception as exc:
         logger.error("query_generation_failed", error=str(exc))
         raise typer.Exit(code=1)
-
-    generation_latency_ms = (time.perf_counter() - generation_start) * 1000
-
-    answer = RAGAnswer(
-        answer=str(raw.get("answer") or FALLBACK_ANSWER),
-        answer_value=str(raw.get("answer_value") or "is_blank"),
-        answer_unit=str(raw.get("answer_unit") or "is_blank"),
-        ref_id=[str(r) for r in (raw.get("ref_id") or [])],
-        supporting_materials=str(raw.get("supporting_materials") or "is_blank"),
-        explanation=str(raw.get("explanation") or "is_blank"),
-        citations=citations,
-        retrieval_latency_ms=round(retrieval_latency_ms, 3),
-        generation_latency_ms=round(generation_latency_ms, 3),
-        retrieval_mode=effective_mode,
-        llm_backend=effective_llm,
-        verification=VerificationResult(
-            passed=bool(contexts) and str(raw.get("answer") or "") != FALLBACK_ANSWER,
-            confidence=0.7 if contexts else 0.0,
-            warnings=[] if contexts else ["No retrieved context above threshold."],
-            corrected_output=None,
-        ),
-    )
 
     payload = json.dumps(answer.model_dump(), ensure_ascii=False)
     if output:

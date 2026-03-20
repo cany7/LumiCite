@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from typer.testing import CliRunner
 
 from src.config.settings import get_settings
-from src.core.schemas import TextChunk
+from src.core.schemas import Citation, RAGAnswer, TextChunk
+from src.ingestion.sources.base import DocumentMeta
 from src.main import app
 import src.main as main_module
 
@@ -13,39 +15,33 @@ runner = CliRunner()
 
 
 def test_query_stdout_conforms_to_phase1_contract(monkeypatch):
-    monkeypatch.setattr(
-        main_module,
-        "_retrieve_results",
-        lambda question, top_k, retrieval_mode, rerank=False: [
-            {
-                "rank": 1,
-                "chunk_id": "paper1_deadbeef",
-                "ref_id": "paper1",
-                "score": 0.9,
-                "text": "evidence text",
-                "page": 2,
-                "source_file": "paper1.pdf",
-                "headings": ["Intro"],
-                "chunk_type": "text",
-            }
-        ],
-    )
+    class FakePipeline:
+        def __init__(self, config):
+            self.config = config
 
-    class FakeGenerator:
-        def __init__(self, **kwargs):
-            self.kwargs = kwargs
+        def answer_question(self, question, **kwargs):
+            return RAGAnswer(
+                answer="42",
+                answer_value="42",
+                answer_unit="units",
+                ref_id=["paper1"],
+                supporting_materials="evidence text",
+                explanation="derived from evidence",
+                citations=[
+                    Citation(
+                        ref_id="paper1",
+                        page=2,
+                        evidence_text="evidence text",
+                        evidence_type="text",
+                    )
+                ],
+                retrieval_latency_ms=1.23,
+                generation_latency_ms=4.56,
+                retrieval_mode=kwargs["retrieval_mode"],
+                llm_backend=kwargs["llm_backend"],
+            )
 
-        def generate_json(self, prompt):
-            return {
-                "answer": "42",
-                "answer_value": "42",
-                "answer_unit": "units",
-                "ref_id": ["paper1"],
-                "supporting_materials": "evidence text",
-                "explanation": "derived from evidence",
-            }
-
-    monkeypatch.setattr(main_module, "LLMGenerator", FakeGenerator)
+    monkeypatch.setattr(main_module, "RAGPipeline", FakePipeline)
 
     result = runner.invoke(app, ["query", "What is the answer?"])
 
@@ -62,7 +58,27 @@ def test_query_stdout_conforms_to_phase1_contract(monkeypatch):
 
 def test_query_output_writes_json_file(monkeypatch, tmp_path):
     out_path = tmp_path / "answer.json"
-    monkeypatch.setattr(main_module, "_retrieve_results", lambda question, top_k, retrieval_mode, rerank=False: [])
+
+    class FakePipeline:
+        def __init__(self, config):
+            self.config = config
+
+        def answer_question(self, question, **kwargs):
+            return RAGAnswer(
+                answer="fallback",
+                answer_value="is_blank",
+                answer_unit="is_blank",
+                ref_id=[],
+                supporting_materials="is_blank",
+                explanation="is_blank",
+                citations=[],
+                retrieval_latency_ms=0.1,
+                generation_latency_ms=0.2,
+                retrieval_mode=kwargs["retrieval_mode"],
+                llm_backend=kwargs["llm_backend"],
+            )
+
+    monkeypatch.setattr(main_module, "RAGPipeline", FakePipeline)
 
     result = runner.invoke(app, ["query", "What is the answer?", "--output", str(out_path)])
 
@@ -135,7 +151,25 @@ def test_ingest_uses_settings_default_workers_and_writes_outputs(monkeypatch, tm
     monkeypatch.setenv("RAG_INGEST_WORKERS", "9")
     get_settings.cache_clear()
     monkeypatch.setattr(main_module, "find_project_root", lambda: tmp_path)
-    monkeypatch.setattr(main_module, "_discover_pdfs", lambda source, path: [tmp_path / "paper1.pdf"])
+    pdf_path = tmp_path / "data" / "pdfs" / "paper1.pdf"
+    pdf_path.parent.mkdir(parents=True, exist_ok=True)
+    pdf_path.write_bytes(b"%PDF-1.4 test")
+
+    class FakeSource:
+        def discover(self):
+            return [
+                DocumentMeta(
+                    doc_id="paper1",
+                    source_type="local_dir",
+                    filename="paper1.pdf",
+                    local_path=pdf_path,
+                )
+            ]
+
+        def fetch(self, doc, dest_dir):
+            return pdf_path
+
+    monkeypatch.setattr(main_module, "create_source", lambda source, path: FakeSource())
     monkeypatch.setattr(
         main_module,
         "extract_pdf_chunks",
@@ -160,6 +194,7 @@ def test_ingest_uses_settings_default_workers_and_writes_outputs(monkeypatch, tm
 
     assert result.exit_code == 0
     payload = json.loads(result.stdout)
+    assert payload["event"] == "ingest_summary"
     assert payload["status"] == "ok"
     assert payload["workers"] == 9
     assert payload["chunks_written"] == 1
