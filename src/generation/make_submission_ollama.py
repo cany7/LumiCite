@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from pathlib import Path
 from typing import List
@@ -131,25 +130,25 @@ def main() -> None:
     if "id" not in df_in.columns or "question" not in df_in.columns:
         raise ValueError("Input CSV must contain 'id' and 'question' columns")
 
-    logger.info(f"Loading metadata...")
+    logger.info("Loading metadata...")
     meta_map = load_metadata_map(root)
 
     # Load existing progress
-    rows = []
-    completed_ids = set()
+    rows: list[dict[str, str]] = []
+    completed_ids: set[str] = set()
 
     if args.resume and not args.force_restart:
         df_existing, completed_ids = load_existing_progress(outp)
         if df_existing is not None:
             # Convert existing DataFrame to list of dicts
-            rows = df_existing.to_dict('records')
+            rows = df_existing.to_dict("records")
             logger.info(f"✅ Resuming from question {len(completed_ids) + 1}/{len(df_in)}")
         else:
-            logger.info(f"🆕 Starting fresh - no existing output found")
+            logger.info("🆕 Starting fresh - no existing output found")
     else:
         if args.force_restart:
-            logger.info(f"🔄 Force restart - ignoring any existing output")
-        logger.info(f"🆕 Starting from beginning")
+            logger.info("🔄 Force restart - ignoring any existing output")
+        logger.info("🆕 Starting from beginning")
 
     total_questions = len(df_in)
     remaining = total_questions - len(completed_ids)
@@ -182,7 +181,7 @@ def main() -> None:
             if chunks:
                 logger.info(f"  ✓ Retrieved {len(chunks)} chunks")
             else:
-                logger.info(f"  ⚠️  No chunks retrieved - will return fallback answer")
+                logger.info("  ⚠️  No chunks retrieved - will return fallback answer")
         except Exception as e:
             logger.info(f"  ❌ Error retrieving chunks: {e}")
             chunks = None

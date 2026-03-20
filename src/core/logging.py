@@ -19,12 +19,13 @@ def configure_logging() -> None:
         return
 
     settings = get_settings()
-    shared = [
+    shared: list[Any] = [
         structlog.contextvars.merge_contextvars,
         structlog.stdlib.add_log_level,
         structlog.processors.TimeStamper(fmt="iso", utc=False),
     ]
 
+    renderer: Any
     if settings.log_format == "json":
         renderer = structlog.processors.JSONRenderer()
     else:

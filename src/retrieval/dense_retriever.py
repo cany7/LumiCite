@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from functools import lru_cache
 from typing import Any
-
-import numpy as np
 from sentence_transformers import SentenceTransformer
 
 from src.config.settings import get_settings

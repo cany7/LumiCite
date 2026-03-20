@@ -267,7 +267,7 @@ class RAGPipeline:
     ) -> RAGAnswer:
         effective_top_k = top_k or self.config.top_k or 5
         effective_mode = retrieval_mode or self.config.retrieval_mode or "hybrid"
-        effective_rerank = self.config.rerank if rerank is None else rerank
+        effective_rerank = bool(self.config.rerank if rerank is None else rerank)
         effective_llm = llm_backend or self.config.llm_backend or "gemini"
 
         retrieval_start = time.perf_counter()

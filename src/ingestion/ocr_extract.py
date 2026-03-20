@@ -5,13 +5,14 @@
 #   3) Images appear in ./data/figures at the project root (<pdfstem>_figureN.png / <pdfstem>_tableN.png)
 #   python image_extract.py docs/report1.pdf --out_dir ./export
 from __future__ import annotations
+
 import argparse
-import logging
-from pathlib import Path
-from typing import List, Tuple, Optional, Any
-import os
-import glob
 import csv
+import glob
+import logging
+import os
+from pathlib import Path
+from typing import Any, List, Optional, Tuple
 
 from docling_core.types.doc import PictureItem, TableItem
 from docling.datamodel.base_models import InputFormat
@@ -53,8 +54,6 @@ def discover_pdfs(user_supplied: List[Path]) -> List[Path]:
         return user_supplied
 
     # Unified path resolution (multi-base like process_image_extract_abs)
-    import os, glob
-    from pathlib import Path
     script_dir = os.path.dirname(os.path.abspath(__file__))
     cwd = os.getcwd()
     default_candidates = [

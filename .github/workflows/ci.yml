@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11.8"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Sync dependencies
+        run: uv sync --frozen
+
+      - name: Ruff
+        run: uv run ruff check src/
+
+      - name: Pytest
+        run: uv run pytest tests/
+
+      - name: Mypy
+        run: uv run mypy src/ --ignore-missing-imports

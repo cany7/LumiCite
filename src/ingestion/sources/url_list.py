@@ -19,6 +19,7 @@ class URLListSource(BaseSource):
             raise FileNotFoundError("URL list file is required for --source url_list")
 
     def discover(self) -> list[DocumentMeta]:
+        assert self.url_file is not None
         documents: list[DocumentMeta] = []
         for index, line in enumerate(self.url_file.read_text(encoding="utf-8").splitlines(), start=1):
             url = line.strip()

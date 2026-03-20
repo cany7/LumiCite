@@ -7,7 +7,7 @@ from typing import Any
 
 from src.core.logging import get_logger
 from src.core.paths import find_project_root
-from src.core.schemas import FigureChunk, TableChunk
+from src.core.schemas import ChunkType, FigureChunk, TableChunk
 
 logger = get_logger(__name__)
 
@@ -97,7 +97,7 @@ def _build_table_chunk(doc_id: str, entry: dict[str, Any]) -> TableChunk:
         chunk_id=_normalize_chunk_id(doc_id, str(entry.get("chunk_id", "")), "table"),
         doc_id=doc_id,
         text=text,
-        chunk_type="table",
+        chunk_type=ChunkType.TABLE,
         page_number=entry.get("page_number"),
         headings=list(entry.get("headings", []) or [visual_name]),
         source_file=str(entry.get("source_file", f"{doc_id}.pdf")),
@@ -115,7 +115,7 @@ def _build_figure_chunk(doc_id: str, entry: dict[str, Any]) -> FigureChunk:
         chunk_id=_normalize_chunk_id(doc_id, str(entry.get("chunk_id", "")), "figure"),
         doc_id=doc_id,
         text=text,
-        chunk_type="figure",
+        chunk_type=ChunkType.FIGURE,
         page_number=entry.get("page_number"),
         headings=list(entry.get("headings", []) or [visual_name]),
         source_file=str(entry.get("source_file", f"{doc_id}.pdf")),

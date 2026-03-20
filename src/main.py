@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import csv
 import hashlib
 import json
 import os
@@ -16,8 +15,8 @@ import pandas as pd
 import requests
 import typer
 import uvicorn
-from fastapi import FastAPI
 
+from src.api.app import create_app
 from src.config.settings import get_settings
 from src.core.logging import get_logger
 from src.core.paths import find_project_root
@@ -562,7 +561,7 @@ def search(
         logger.error("search_failed", error=str(exc))
         raise typer.Exit(code=1)
 
-    results = []
+    results: list[dict[str, Any]] = []
     for hit in hits:
         results.append(
             {
@@ -624,18 +623,8 @@ def serve(
     port: int = typer.Option(8000, "--port"),
     reload: bool = typer.Option(False, "--reload"),
 ) -> None:
-    api = FastAPI(title="RAG API")
+    if reload:
+        uvicorn.run("src.api.app:create_app", factory=True, host=host, port=port, reload=True)
+        return
 
-    @api.get("/api/v1/health")
-    def health() -> dict:
-        settings = get_settings()
-        return {
-            "status": "ok",
-            "index_loaded": (find_project_root() / "data" / "my_faiss.index").exists(),
-            "num_papers": 0,
-            "num_chunks": 0,
-            "embedding_model": settings.embedding_model,
-            "retrieval_modes_available": ["dense", "sparse", "hybrid"],
-        }
-
-    uvicorn.run(api, host=host, port=port, reload=reload)
+    uvicorn.run(create_app(), host=host, port=port, reload=False)

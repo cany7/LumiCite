@@ -42,3 +42,12 @@ dev = [
     "pytest-asyncio>=1.3.0",
     "ruff>=0.15.5",
 ]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+
+[tool.mypy]
+python_version = "3.11"
+exclude = ["^src/ingestion/ocr_extract\\.py$"]
+disable_error_code = ["import-untyped"]
