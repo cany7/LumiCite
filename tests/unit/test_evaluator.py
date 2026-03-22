@@ -10,6 +10,7 @@ import pytest
 
 import src.evaluation.evaluator as evaluator_module
 from src.evaluation.evaluator import Evaluator
+from src.retrieval.query_explanation import RetrievalExecution
 
 
 class FakeRetriever:
@@ -75,6 +76,7 @@ def test_evaluator_run_writes_report_and_summary_files(monkeypatch: pytest.Monke
         retrieval_mode="hybrid",
         top_k=2,
         rerank=False,
+        query_explanation=False,
         output_dir=tmp_path,
         tag="phase2",
     ).run()
@@ -107,6 +109,7 @@ def test_evaluator_run_uses_reranked_results(monkeypatch: pytest.MonkeyPatch, tm
         retrieval_mode="hybrid",
         top_k=1,
         rerank=True,
+        query_explanation=False,
         output_dir=tmp_path,
         tag="phase2_rerank",
     ).run()
@@ -116,3 +119,61 @@ def test_evaluator_run_uses_reranked_results(monkeypatch: pytest.MonkeyPatch, tm
     assert report["recall_at_k"] == 1.0
     assert report["mrr"] == 1.0
     assert report["per_question"][0]["retrieved_ref_ids"] == ["paper1"]
+
+
+def test_evaluator_supports_query_explanation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    dataset = tmp_path / "dataset.csv"
+    _write_dataset(dataset, [{"id": "q1", "question": "expanded question", "ref_id": "paper1"}])
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        evaluator_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            embedding_model="mock-model",
+            api_model="qwen/default",
+            api_key="test-api-key",
+            api_base_url="https://api.example.com/v1",
+            query_explanation_reasoning_effort="high",
+        ),
+    )
+    monkeypatch.setattr(evaluator_module, "get_retriever", lambda mode: FakeRetriever({}))
+    monkeypatch.setattr(evaluator_module, "_git_commit", lambda: "abc123")
+
+    def fake_retrieve_with_optional_query_explanation(  # noqa: ANN001, ANN201
+        question,
+        *,
+        top_k,
+        retrieval_mode,
+        rerank,
+        query_explanation,
+    ):
+        captured["question"] = question
+        captured["top_k"] = top_k
+        captured["retrieval_mode"] = retrieval_mode
+        captured["rerank"] = rerank
+        captured["query_explanation"] = query_explanation
+        return RetrievalExecution(results=[_result("paper1", 1)], expanded_query="expanded retrieval query")
+
+    monkeypatch.setattr(
+        evaluator_module,
+        "retrieve_with_optional_query_explanation",
+        fake_retrieve_with_optional_query_explanation,
+    )
+
+    report_path, _summary_path = Evaluator(
+        dataset=dataset,
+        retrieval_mode="hybrid",
+        top_k=1,
+        rerank=False,
+        query_explanation=True,
+        output_dir=tmp_path,
+        tag="phase2_expansion",
+    ).run()
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert captured["query_explanation"].enabled is True
+    assert captured["query_explanation"].llm_model == "qwen/default"
+    assert captured["query_explanation"].api_key == "test-api-key"
+    assert captured["query_explanation"].reasoning_effort == "high"
+    assert report["recall_at_k"] == 1.0

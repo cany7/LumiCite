@@ -79,13 +79,16 @@ def test_api_routes_follow_current_phase4_contracts(tmp_path: Path, monkeypatch)
             retrieval_mode="hybrid",
             llm_backend="api",
             api_model="qwen/default",
+            api_key="test-api-key",
+            api_base_url="https://api.example.com/v1",
+            query_explanation_reasoning_effort="none",
         ),
     )
     monkeypatch.setattr(routes_module, "_index_loaded", lambda: True)
     monkeypatch.setattr(
         routes_module,
         "_retrieve_results",
-        lambda question, top_k, retrieval_mode, rerank: [
+        lambda question, top_k, retrieval_mode, rerank, query_explanation=None: [
             {
                 "rank": 1,
                 "doc_id": "paper2",
@@ -142,3 +145,77 @@ def test_api_routes_follow_current_phase4_contracts(tmp_path: Path, monkeypatch)
 
     assert missing.status_code == 404
     assert missing.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+def test_api_routes_accept_query_explanation_flags(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "repo"
+    (root / "src").mkdir(parents=True)
+    (root / "data").mkdir()
+    _write_chunks(root / "data" / "metadata" / "chunks" / "chunks.jsonl")
+    captured: dict[str, object] = {}
+
+    class FakePipeline:
+        def __init__(self, config) -> None:  # noqa: ANN001
+            captured["config"] = config
+
+        def answer_question(self, question: str, **kwargs) -> RAGAnswer:  # noqa: ANN003
+            captured["question_kwargs"] = kwargs
+            return RAGAnswer(
+                answer="552 tCO2e",
+                supporting_materials="alpha evidence",
+                explanation="grounded answer",
+                citations=[],
+                retrieval_latency_ms=12.3,
+                generation_latency_ms=45.6,
+                retrieval_mode="hybrid",
+                llm_backend="api",
+                verification=VerificationResult(passed=True, confidence=0.95, warnings=[]),
+            )
+
+    def fake_retrieve_results(question, top_k, retrieval_mode, rerank, query_explanation=None):  # noqa: ANN001, ANN201
+        captured["search_query_explanation"] = query_explanation
+        return [
+            {
+                "rank": 1,
+                "doc_id": "paper1",
+                "chunk_id": "paper1_deadbeef",
+                "chunk_type": "text",
+                "score": 0.91,
+                "text": "alpha evidence",
+                "page_number": 1,
+                "headings": ["Intro"],
+                "caption": "",
+                "asset_path": "",
+            }
+        ]
+
+    monkeypatch.setattr(routes_module, "find_project_root", lambda: root)
+    monkeypatch.setattr(
+        routes_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            embedding_model="mock-model",
+            retrieval_mode="hybrid",
+            llm_backend="api",
+            api_model="qwen/default",
+            api_key="test-api-key",
+            api_base_url="https://api.example.com/v1",
+            query_explanation_reasoning_effort="minimal",
+        ),
+    )
+    monkeypatch.setattr(routes_module, "_index_loaded", lambda: True)
+    monkeypatch.setattr(routes_module, "_retrieve_results", fake_retrieve_results)
+    monkeypatch.setattr(routes_module, "_build_rag_pipeline", lambda config: FakePipeline(config))
+
+    client = TestClient(create_app())
+
+    search = client.post("/api/v1/search", json={"question": "trend", "query_explanation": True})
+    query = client.post("/api/v1/query", json={"question": "trend", "query_explanation": True})
+
+    assert search.status_code == 200
+    assert captured["search_query_explanation"].enabled is True
+    assert captured["search_query_explanation"].llm_model == "qwen/default"
+    assert captured["search_query_explanation"].reasoning_effort == "minimal"
+    assert captured["config"].query_explanation_enabled is True
+    assert captured["question_kwargs"]["query_explanation_enabled"] is True
+    assert query.status_code == 200

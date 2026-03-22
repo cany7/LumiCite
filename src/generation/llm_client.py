@@ -18,6 +18,11 @@ from src.core.paths import find_project_root
 
 logger = get_logger(__name__)
 JSON_FENCE_RE = re.compile(r"^```[a-zA-Z]*\n([\s\S]*?)\n```$", re.MULTILINE)
+INVALID_JSON_ESCAPE_RE = re.compile(r'\\(?!["\\/bfnrtu])')
+GENERATION_SECTION_RE = re.compile(
+    r"^(ANSWER|SUPPORTING_MATERIALS|EXPLANATION|CITED_CHUNK_IDS):[ \t]*(.*)$",
+    re.MULTILINE,
+)
 
 
 def fallback_generation_payload() -> dict[str, Any]:
@@ -26,6 +31,7 @@ def fallback_generation_payload() -> dict[str, Any]:
         "supporting_materials": "is_blank",
         "explanation": "is_blank",
         "citations": [],
+        "cited_chunk_ids": [],
     }
 
 
@@ -42,24 +48,92 @@ def strip_markdown_fences(text: str) -> str:
     return text.strip()
 
 
+def _loads_json_object(text: str) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _escape_invalid_json_escapes(text: str) -> str:
+    return INVALID_JSON_ESCAPE_RE.sub(r"\\\\", text)
+
+
 def parse_json_response(text: str) -> dict[str, Any] | None:
     if not text:
         return None
 
     cleaned = strip_markdown_fences(text)
-    try:
-        payload = json.loads(cleaned)
-    except json.JSONDecodeError:
-        start = cleaned.find("{")
-        end = cleaned.rfind("}")
-        if start == -1 or end == -1 or end <= start:
-            return None
-        try:
-            payload = json.loads(cleaned[start : end + 1])
-        except json.JSONDecodeError:
-            return None
+    candidates: list[str] = [cleaned]
 
-    return payload if isinstance(payload, dict) else None
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        candidates.append(cleaned[start : end + 1])
+
+    for candidate in candidates:
+        payload = _loads_json_object(candidate)
+        if payload is not None:
+            return payload
+
+        repaired = _loads_json_object(_escape_invalid_json_escapes(candidate))
+        if repaired is not None:
+            return repaired
+
+    return None
+
+
+def _parse_chunk_id_lines(value: str) -> list[str]:
+    chunk_ids: list[str] = []
+    for raw_line in value.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        line = re.sub(r"^[-*]\s*", "", line).strip()
+        if not line:
+            continue
+        for candidate in [part.strip() for part in line.split(",")]:
+            if candidate:
+                chunk_ids.append(candidate)
+    return chunk_ids
+
+
+def parse_generation_response(text: str) -> dict[str, Any] | None:
+    payload = parse_json_response(text)
+    if payload is not None:
+        return payload
+
+    if not text:
+        return None
+
+    cleaned = strip_markdown_fences(text)
+    matches = list(GENERATION_SECTION_RE.finditer(cleaned))
+    if not matches:
+        return None
+
+    sections: dict[str, str] = {}
+    for index, match in enumerate(matches):
+        label = match.group(1).lower()
+        inline_value = match.group(2).strip()
+        start = match.end()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(cleaned)
+        block_value = cleaned[start:end].strip()
+        if inline_value and block_value:
+            sections[label] = f"{inline_value}\n{block_value}".strip()
+        else:
+            sections[label] = inline_value or block_value
+
+    if "answer" not in sections:
+        return None
+
+    return {
+        "answer": sections.get("answer", "").strip(),
+        "supporting_materials": sections.get("supporting_materials", "").strip(),
+        "explanation": sections.get("explanation", "").strip(),
+        "cited_chunk_ids": _parse_chunk_id_lines(sections.get("cited_chunk_ids", "")),
+        "citations": [],
+    }
 
 
 def normalize_generation_payload(data: dict[str, Any]) -> dict[str, Any]:
@@ -72,18 +146,21 @@ def normalize_generation_payload(data: dict[str, Any]) -> dict[str, Any]:
             ).strip(),
             "explanation": str(data.get("explanation", payload["explanation"]) or payload["explanation"]).strip(),
             "citations": data.get("citations", payload["citations"]) or [],
+            "cited_chunk_ids": data.get("cited_chunk_ids", payload["cited_chunk_ids"]) or [],
         }
     )
 
     if not isinstance(payload["citations"], list):
         payload["citations"] = []
+    if not isinstance(payload["cited_chunk_ids"], list):
+        payload["cited_chunk_ids"] = []
 
     return payload
 
 
 class LLMClient(ABC):
     @abstractmethod
-    def generate(self, prompt: str) -> str:
+    def generate(self, prompt: str, *, system_prompt: str | None = None) -> str:
         raise NotImplementedError
 
 
@@ -118,6 +195,7 @@ class APIClient(LLMClient):
         model: str | None = None,
         api_key: str | None = None,
         base_url: str | None = None,
+        reasoning_effort: str | None = None,
         temperature: float = 0.0,
         timeout: int | None = None,
     ) -> None:
@@ -125,9 +203,20 @@ class APIClient(LLMClient):
         self.model_name = model or settings.api_model
         self.api_key = (api_key if api_key is not None else settings.api_key).strip()
         self.base_url = (base_url if base_url is not None else settings.api_base_url).strip()
+        self.reasoning_effort = reasoning_effort.strip().lower() if reasoning_effort else None
         self.temperature = temperature
         self.timeout = timeout or settings.api_timeout_seconds
         self._client: Any | None = None
+
+    def _extra_body(self) -> dict[str, Any] | None:
+        if not self.reasoning_effort:
+            return None
+        return {
+            "reasoning": {
+                "effort": self.reasoning_effort,
+                "exclude": True,
+            }
+        }
 
     def _load_client(self) -> Any | None:
         if self._client is not None:
@@ -168,24 +257,33 @@ class APIClient(LLMClient):
         return self._client
 
     @timed("generate")
-    def generate(self, prompt: str) -> str:
+    def generate(self, prompt: str, *, system_prompt: str | None = None) -> str:
         client = self._load_client()
+        effective_system_prompt = (
+            system_prompt.strip()
+            if system_prompt is not None and system_prompt.strip()
+            else (
+                "You answer RAG questions using only supplied evidence. "
+                "Return only the requested structured plain-text fields."
+            )
+        )
+        request_kwargs: dict[str, Any] = {
+            "model": self.model_name,
+            "temperature": self.temperature,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": effective_system_prompt,
+                },
+                {"role": "user", "content": prompt},
+            ],
+        }
+        extra_body = self._extra_body()
+        if extra_body is not None:
+            request_kwargs["extra_body"] = extra_body
 
         try:
-            response = client.chat.completions.create(
-                model=self.model_name,
-                temperature=self.temperature,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "You answer RAG questions using only supplied evidence. "
-                            "Return a JSON object only."
-                        ),
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-            )
+            response = client.chat.completions.create(**request_kwargs)
         except Exception as exc:
             raise GenerationError(
                 error_type="generation_request_error",
@@ -264,7 +362,7 @@ class OllamaClient(LLMClient):
         return self.model_name
 
     @timed("generate")
-    def generate(self, prompt: str) -> str:
+    def generate(self, prompt: str, *, system_prompt: str | None = None) -> str:
         model_name = self._resolve_model_name()
         if not model_name:
             raise GenerationError(
@@ -274,12 +372,16 @@ class OllamaClient(LLMClient):
                 context={"base_url": self.base_url},
             )
 
+        effective_prompt = prompt
+        if system_prompt is not None and system_prompt.strip():
+            effective_prompt = f"{system_prompt.strip()}\n\n{prompt.strip()}"
+
         try:
             response = requests.post(
                 f"{self.base_url}/api/generate",
                 json={
                     "model": model_name,
-                    "prompt": prompt,
+                    "prompt": effective_prompt,
                     "stream": False,
                     "options": {
                         "temperature": self.temperature,
@@ -440,6 +542,7 @@ def create_llm_client(
     model: str | None = None,
     api_key: str | None = None,
     base_url: str | None = None,
+    reasoning_effort: str | None = None,
 ) -> LLMClient:
     settings = get_settings()
     llm_backend = backend or settings.llm_backend
@@ -450,5 +553,6 @@ def create_llm_client(
             model=model or settings.api_model,
             api_key=api_key,
             base_url=base_url or settings.api_base_url,
+            reasoning_effort=reasoning_effort,
         )
     raise ValueError("llm backend must be one of: api, ollama")

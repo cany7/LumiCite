@@ -17,10 +17,11 @@ from src.api.schemas import (
     SearchRequest,
     SearchResponse,
 )
-from src.config.settings import get_settings
+from src.config.settings import get_settings, normalize_reasoning_effort
 from src.core.logging import get_logger
 from src.core.paths import chunks_jsonl_path, find_project_root
 from src.core.schemas import SearchResult
+from src.retrieval.query_explanation import QueryExplanationConfig, retrieve_with_optional_query_explanation
 
 logger = get_logger(__name__)
 api_router = APIRouter(prefix="/api/v1")
@@ -83,18 +84,21 @@ def _index_loaded() -> bool:
         return False
 
 
-def _retrieve_results(question: str, top_k: int, retrieval_mode: str, rerank: bool) -> list[dict[str, Any]]:
-    from src.retrieval import get_retriever
-    from src.retrieval.reranker import Reranker
-
-    retriever = get_retriever(retrieval_mode)
-    fetch_k = top_k * 3 if rerank else top_k
-    results = retriever.retrieve(question, fetch_k)
-    if not rerank:
-        return results[:top_k]
-
-    reranker = Reranker()
-    return reranker.rerank(question, results, top_k)
+def _retrieve_results(
+    question: str,
+    top_k: int,
+    retrieval_mode: str,
+    rerank: bool,
+    *,
+    query_explanation: QueryExplanationConfig | None = None,
+) -> list[dict[str, Any]]:
+    return retrieve_with_optional_query_explanation(
+        question,
+        top_k=top_k,
+        retrieval_mode=retrieval_mode,
+        rerank=rerank,
+        query_explanation=query_explanation,
+    ).results
 
 
 def _build_rag_pipeline(config: Any) -> Any:
@@ -146,10 +150,27 @@ def papers() -> PapersResponse:
 def search(payload: SearchRequest) -> SearchResponse:
     settings = get_settings()
     retrieval_mode = payload.retrieval_mode or settings.retrieval_mode
+    query_explanation_config = (
+        QueryExplanationConfig(
+            enabled=True,
+            llm_model=settings.api_model,
+            api_key=settings.api_key,
+            base_url=settings.api_base_url,
+            reasoning_effort=normalize_reasoning_effort(settings.query_explanation_reasoning_effort),
+        )
+        if payload.query_explanation
+        else None
+    )
 
     try:
         start = time.perf_counter()
-        hits = _retrieve_results(payload.question, payload.top_k, retrieval_mode, rerank=payload.rerank)
+        hits = _retrieve_results(
+            payload.question,
+            payload.top_k,
+            retrieval_mode,
+            rerank=payload.rerank,
+            query_explanation=query_explanation_config,
+        )
         retrieval_latency_ms = (time.perf_counter() - start) * 1000
     except Exception as exc:
         if _is_index_error(exc):
@@ -211,6 +232,7 @@ def query(payload: QueryRequest) -> QueryResponse:
                 top_k=payload.top_k,
                 retrieval_mode=retrieval_mode,
                 rerank=payload.rerank,
+                query_explanation_enabled=payload.query_explanation,
                 llm_backend=llm_backend,
                 llm_model=(payload.llm_model or settings.api_model) if llm_backend == "api" else None,
             )
@@ -220,6 +242,7 @@ def query(payload: QueryRequest) -> QueryResponse:
             top_k=payload.top_k,
             retrieval_mode=retrieval_mode,
             rerank=payload.rerank,
+            query_explanation_enabled=payload.query_explanation,
             llm_backend=llm_backend,
             llm_model=(payload.llm_model or settings.api_model) if llm_backend == "api" else None,
         )

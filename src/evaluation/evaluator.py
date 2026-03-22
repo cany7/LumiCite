@@ -12,10 +12,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from src.config.settings import get_settings
+from src.config.settings import get_settings, normalize_reasoning_effort
 from src.core.schemas import BenchmarkReport
 from src.evaluation.metrics import mrr, ndcg_at_k, recall_at_k
 from src.retrieval import get_retriever
+from src.retrieval.query_explanation import QueryExplanationConfig, retrieve_with_optional_query_explanation
 from src.retrieval.reranker import Reranker
 
 
@@ -56,6 +57,7 @@ class Evaluator:
         retrieval_mode: str,
         top_k: int,
         rerank: bool,
+        query_explanation: bool,
         output_dir: Path,
         tag: str,
     ) -> None:
@@ -63,6 +65,7 @@ class Evaluator:
         self.retrieval_mode = retrieval_mode
         self.top_k = top_k
         self.rerank = rerank
+        self.query_explanation = query_explanation
         self.output_dir = output_dir
         self.tag = tag
         self.settings = get_settings()
@@ -70,13 +73,29 @@ class Evaluator:
         self.reranker = Reranker() if self.rerank else None
 
     def _retrieve(self, question: str) -> tuple[list[dict], float]:
-        fetch_k = self.top_k * 3 if self.rerank else self.top_k
         start = time.perf_counter()
-        results = self.retriever.retrieve(question, fetch_k)
-        if self.reranker is not None:
-            results = self.reranker.rerank(question, results, self.top_k)
+        if self.query_explanation:
+            execution = retrieve_with_optional_query_explanation(
+                question,
+                top_k=self.top_k,
+                retrieval_mode=self.retrieval_mode,
+                rerank=self.rerank,
+                query_explanation=QueryExplanationConfig(
+                    enabled=True,
+                    llm_model=self.settings.api_model,
+                    api_key=self.settings.api_key,
+                    base_url=self.settings.api_base_url,
+                    reasoning_effort=normalize_reasoning_effort(self.settings.query_explanation_reasoning_effort),
+                ),
+            )
+            results = execution.results
         else:
-            results = results[: self.top_k]
+            fetch_k = self.top_k * 5 if self.rerank else self.top_k
+            results = self.retriever.retrieve(question, fetch_k)
+            if self.reranker is not None:
+                results = self.reranker.rerank(question, results, self.top_k)
+            else:
+                results = results[: self.top_k]
         latency_ms = (time.perf_counter() - start) * 1000
         return results, latency_ms
 
@@ -96,7 +115,8 @@ class Evaluator:
             question = str(row.get("question", "")).strip()
             if not question:
                 continue
-            relevant_ref_doc_ids = _parse_ref_doc_ids(row.get("ref_doc_id"))
+            question_id = str(row.get("question_id", row.get("id", ""))).strip()
+            relevant_ref_doc_ids = _parse_ref_doc_ids(row.get("ref_doc_id", row.get("ref_id")))
             results, latency_ms = self._retrieve(question)
             retrieved_doc_ids = [str(item.get("doc_id", "")).strip() for item in results if item.get("doc_id")]
 
@@ -110,10 +130,11 @@ class Evaluator:
             latencies.append(latency_ms)
             per_question.append(
                 {
-                    "question_id": str(row.get("question_id", "")),
+                    "question_id": question_id,
                     "question": question,
                     "relevant_ref_doc_ids": relevant_ref_doc_ids,
                     "retrieved_doc_ids": retrieved_doc_ids,
+                    "retrieved_ref_ids": retrieved_doc_ids,
                     "recall_at_k": recall_value,
                     "mrr": mrr_value,
                     "ndcg_at_k": ndcg_value,
@@ -126,7 +147,7 @@ class Evaluator:
             tag=self.tag,
             timestamp=_now_utc(),
             config_hash=hashlib.md5(
-                f"{self.retrieval_mode}:{self.top_k}:{self.rerank}".encode("utf-8")
+                f"{self.retrieval_mode}:{self.top_k}:{self.rerank}:{self.query_explanation}".encode("utf-8")
             ).hexdigest(),
             git_commit=_git_commit(),
             dataset=str(self.dataset),

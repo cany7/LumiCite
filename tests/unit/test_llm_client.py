@@ -63,3 +63,96 @@ def test_ensure_ollama_ready_waits_for_configured_model(monkeypatch: pytest.Monk
 
     assert result == "started"
     assert subprocess_calls == [["docker", "compose", "up", "-d", "ollama"]]
+
+
+def test_api_client_passes_reasoning_effort_via_extra_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeCompletions:
+        def create(self, **kwargs):  # noqa: ANN003
+            captured.update(kwargs)
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            content="ANSWER: 55%\nSUPPORTING_MATERIALS: evidence\nEXPLANATION: because\nCITED_CHUNK_IDS:\n- paper1_deadbeef"
+                        )
+                    )
+                ]
+            )
+
+    class FakeChat:
+        completions = FakeCompletions()
+
+    class FakeClient:
+        chat = FakeChat()
+
+    client = llm_client_module.APIClient(
+        model="qwen/test",
+        api_key="key",
+        base_url="https://openrouter.ai/api/v1",
+        reasoning_effort="low",
+    )
+    monkeypatch.setattr(client, "_load_client", lambda: FakeClient())
+
+    text = client.generate("What happened?")
+
+    assert "ANSWER: 55%" in text
+    assert captured["extra_body"] == {"reasoning": {"effort": "low", "exclude": True}}
+
+
+def test_api_client_omits_extra_body_when_reasoning_effort_not_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeCompletions:
+        def create(self, **kwargs):  # noqa: ANN003
+            captured.update(kwargs)
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content="ANSWER: ok"))]
+            )
+
+    class FakeChat:
+        completions = FakeCompletions()
+
+    class FakeClient:
+        chat = FakeChat()
+
+    client = llm_client_module.APIClient(
+        model="qwen/test",
+        api_key="key",
+        base_url="https://openrouter.ai/api/v1",
+    )
+    monkeypatch.setattr(client, "_load_client", lambda: FakeClient())
+
+    client.generate("What happened?")
+
+    assert "extra_body" not in captured
+
+
+def test_api_client_allows_custom_system_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeCompletions:
+        def create(self, **kwargs):  # noqa: ANN003
+            captured.update(kwargs)
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content="rewritten query"))]
+            )
+
+    class FakeChat:
+        completions = FakeCompletions()
+
+    class FakeClient:
+        chat = FakeChat()
+
+    client = llm_client_module.APIClient(
+        model="qwen/test",
+        api_key="key",
+        base_url="https://openrouter.ai/api/v1",
+    )
+    monkeypatch.setattr(client, "_load_client", lambda: FakeClient())
+
+    text = client.generate("Question: test", system_prompt="Rewrite only")
+
+    assert text == "rewritten query"
+    assert captured["messages"][0]["content"] == "Rewrite only"

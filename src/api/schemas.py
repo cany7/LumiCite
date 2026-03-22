@@ -4,7 +4,12 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from src.config.settings import get_settings
 from src.core.schemas import RAGAnswer, SearchResult
+
+
+def _default_top_k() -> int:
+    return get_settings().retrieval_top_k
 
 
 class HealthResponse(BaseModel):
@@ -28,9 +33,10 @@ class PapersResponse(BaseModel):
 
 class SearchRequest(BaseModel):
     question: str
-    top_k: int = 10
+    top_k: int = Field(default_factory=_default_top_k)
     retrieval_mode: Literal["dense", "sparse", "hybrid"] | None = None
     rerank: bool = False
+    query_explanation: bool = True
 
 
 class SearchResponse(BaseModel):
@@ -42,9 +48,10 @@ class SearchResponse(BaseModel):
 
 class QueryRequest(BaseModel):
     question: str
-    top_k: int = 5
+    top_k: int = Field(default_factory=_default_top_k)
     retrieval_mode: Literal["dense", "sparse", "hybrid"] | None = None
-    rerank: bool = True
+    rerank: bool = False
+    query_explanation: bool = True
     llm_backend: Literal["api", "ollama"] | None = None
     llm_model: str | None = None
 

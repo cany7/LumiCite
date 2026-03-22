@@ -332,7 +332,7 @@ The generated report in this run recorded:
 
 ## Data and Pipeline Schema
 
-During runtime, the project produces a fixed set of key directories and intermediate artifacts:
+The project generates the following directories and artifacts during runtime:
 
 - `data/pdfs/`: location for source PDF files and default URL input files
   - `papers.csv`: URL CSV input file; required field: `url`
@@ -340,36 +340,36 @@ During runtime, the project produces a fixed set of key directories and intermed
 - `data/intermediate/mineru/`: raw intermediate outputs generated during parsing
 - `data/assets/`: canonical asset directory for figures and tables
 - `data/metadata/`: canonical chunks, embeddings, and retrieval indexes
-- `rag.log`: unified error log in the project root
+- `rag.log`: Unified error log located in the project root.
 
-- The project uses a unified chunk schema across ingestion, retrieval, and answering
+- The project maintains a unified chunk schema across ingestion, retrieval, and answering.
   - Every chunk includes `chunk_id`, `doc_id`, `text`, `chunk_type`, `page_number`, and `headings` as base fields
-  - Figure and table chunks additionally include fields such as `caption`, `footnotes`, and `asset_path` for localization and supplementary context
-- The retrieval stage uses a unified `SearchResult` schema for matched results, while the QA stage uses `Citation` for evidence references and returns final outputs through `RAGAnswer`
-  - Together, this schema design covers the full data path from chunk normalization, embedding generation, and index construction to retrieval outputs and final answer generation
+  - Figure and table chunks include additional fields, such as `caption`, `footnotes`, and `asset_path`, for context and localization.
+- Retrieval uses a unified `SearchResult` schema, while the Q&A stage uses `Citation` for references and returns final outputs via `RAGAnswer`.
+  - This schema design covers the entire data path—from chunk normalization and embedding generation to retrieval and final answer synthesis.
 
 ## Usage Notes
 
-- When the knowledge base changes through document additions, replacements, removals, or modifications to `papers.csv` / `papers.txt`, you need to rerun `rag parse` before performing retrieval or QA.
-- If the knowledge base has not changed, there is no need to rerun `rag parse`; you can use `rag search` or `rag query` directly.
-- `rag search` is useful for inspecting recall results, examining matched content, and debugging retrieval strategies. `rag query` is intended for producing final answers with citations on top of retrieval.
-- The generation stage uses an external model API by default. If a local backend is required, you can explicitly switch both `rag parse` and `rag query` to `ollama`.
-- This project is particularly well suited to QA over academic papers where main text, figures, and tables must be used together, because the system brings all evidence types into a unified retrieval, reranking, and answer generation workflow.
+- If the knowledge base changes (additions, replacements, removals, or modifications to `papers.csv`/`papers.txt`), rerun `rag parse` before retrieval or Q&A.
+- If the knowledge base is unchanged, you can proceed directly to `rag search` or `rag query`.
+- `rag search` is useful for inspecting recall and debugging retrieval strategies, while `rag query` produces final answers with citations.
+- The generation stage defaults to an external model API. For local processing, switch both `rag parse` and `rag query` to `ollama`.
+- This project is optimized for Q&A over academic papers where main text, figures, and tables are interconnected, unifying all evidence types into a seamless retrieval, reranking, and generation workflow.
 
 ## Troubleshooting
 
 ### `rag parse` failed
 
-Check the following first:
+Check the following:
 
-- Whether the local parsing runtime is correctly installed and callable in the current environment
-- Whether the input path is correct
+- Ensure the local parsing runtime is installed and callable.
+- Verify the input path.
 - Whether the visual model API configuration is available
 - Whether the input directory or URL file content matches the expected format
 
 ### `rag query --llm api` failed
 
-Check the following first:
+Check the following:
 
 - `RAG_API_BASE_URL`
 - `RAG_API_KEY`
@@ -378,7 +378,7 @@ Check the following first:
 
 ### `rag query --llm ollama` failed
 
-Check the following first:
+Check the following:
 
 - Whether Docker is running properly
 - Whether the local `ollama` container can be started automatically
@@ -389,25 +389,42 @@ All runtime errors are logged to `rag.log` in the project root.
 
 ## Tests
 
-The current `tests/` directory includes both unit tests and integration tests, mainly covering the following areas:
+The `tests/` directory contains unit and integration tests covering:
 
-- Retrieval pipeline: dense, sparse, and hybrid retrieval, RRF fusion, and reranker behavior
-- QA pipeline: prompt construction, generation output normalization, citation completion, answer validation, and fallback behavior
-- Parsing and ingestion pipeline: text chunking, MinerU output mapping, figure/table asset handling, embedding generation, index construction, and persistence consistency
-- Data sources and incremental processing: discovery and ingestion for `local_dir`, `url_csv`, and `url_list`, manifest-based incremental processing, failed-document retry, and stale document pruning
-- Interface and runtime contracts: default CLI and FastAPI parameters, response structures, health checks, and error response formats
-- Engineering constraints: configuration loading, logging and error types, Docker / CI configuration constraints, and schema field validation
+- **Retrieval pipeline:** Dense, sparse, and hybrid retrieval, RRF fusion, and reranker behavior
+- **QA pipeline:** Prompt construction, generation output normalization, citation completion, answer validation, and fallback behavior
+- **Parsing and ingestion:** Text chunking, MinerU output mapping, figure/table asset handling, embedding generation, index construction, and persistence consistency
+- **Data sources:** Discovery and ingestion for `local_dir`, `url_csv`, and `url_list`, manifest-based incremental processing, failed-document retry, and stale document pruning
+- **Interface and schema:** Default CLI and FastAPI parameters, response structures, health checks, and field validation
+- **Engineering constraints:** Configuration loading, logging, Docker/CI configuration, and error handling
 
 ## Example Data
 
-The repository includes a sample paper CSV list at `data/pdfs/sample_ai_impacts.csv`, containing 30 papers related to AI environmental impact. It can be used as a sample knowledge base input.
+A sample paper CSV list is provided at `data/pdfs/sample_ai_impacts.csv`, containing 30 papers on AI environmental impact. It can be used as a sample knowledge base input for the system.
 
-The benchmark dataset `data/benchmark_QA.csv` is constructed from the sample papers above and is used to evaluate recall, ranking, and retrieval latency in the benchmark pipeline.
+The benchmark dataset `data/benchmark_QA.csv` is constructed from the sample papers above and is used to evaluate retrieval recall, ranking quality, and retrieval latency in the benchmark pipeline. It contains a total of 40 test questions.
+
+The sample data is adapted from publicly released datasets and is provided only for non-commercial research and evaluation use in this project. The underlying papers and benchmark data remain subject to their original licenses.
+
+## Evaluation Results
+
+The system was evaluated on this benchmark dataset under the default parameter settings. The full results are available in [`benchmark_QA_default_query_results.csv`](./tests/benchmark_QA_default_query_results.csv).
+
+Using a **semantic equivalence** criterion, the system produced **33 correct answers out of 40**, corresponding to an overall accuracy of **82.5%**. The average **retrieval latency** was **891 ms**, and the average **generation latency** was **1756 ms**.
+
+Latency measurements should be treated as reference values only, since both retrieval and generation can be affected by factors such as cloud LLM API service conditions and the compute performance of the test environment. Results may vary noticeably across different runtime settings.
+
+For a subset of harder questions that could not be answered correctly under the default settings, we additionally conducted targeted follow-up tests by adjusting `reasoning_effort`, `rerank`, and `top_k`. After these supplementary tests, only a small number of high-difficulty questions still could not be answered reliably.
+
+The main remaining bottlenecks are concentrated in several difficult query patterns, such as questions requiring multi-table or image evidence composition, cross-document evidence integration and reasoning, or more complex calculation-heavy inference. Performance on these cases depends not only on retrieval completeness, but also on the overall capability of the selected LLM. Further improvement is therefore likely possible with a stronger generation model.
+
+At the same time, when the system could not answer these difficult questions reliably, it consistently returned fallback responses rather than forcing unsupported answers. Overall, the system is able to generate accurate, high-quality, evidence-grounded answers in academic knowledge base settings, while effectively avoiding hallucinated responses.
 
 ## Next Steps
 
-- Add evaluation modules focused on generation quality, using either manually annotated answers or LLM-as-a-judge methods to further assess correctness, completeness, relevance, and clarity
-- Introduce RAG evaluation frameworks such as RAGAs to evaluate answer-evidence consistency across dimensions such as faithfulness, answer relevancy, context precision, and context recall, and further improve generation quality
+- Integrate evaluation modules for generation quality, using manually annotated answers or LLM-as-a-judge methods to assess correctness, completeness, relevance, and clarity.
+- Adopt RAG evaluation frameworks like RAGAs to assess answer-evidence consistency (faithfulness, relevancy, precision, recall) and improve generation quality.
+- Add automatic query routing and query-type detection so the system can choose `top_k`, `reasoning_effort`, `rerank`, and related retrieval-generation parameters automatically for each question.
 
 ## References and Dependencies
 
@@ -429,4 +446,4 @@ This project is built on the following open-source frameworks and components:
 
 ## License
 
-This project is released under the AGPL-3.0 license, consistent with the license requirements of related dependencies used in the project, including MinerU. This license does not apply to the papers and benchmark datasets in the example data, which remain subject to their original data license (CC BY-NC 4.0).
+This project is released under the AGPL-3.0 license, aligning with the licensing requirements of dependencies such as MinerU. This license does not apply to the papers and benchmark datasets in the example data, which remain subject to their original data license (CC BY-NC 4.0).

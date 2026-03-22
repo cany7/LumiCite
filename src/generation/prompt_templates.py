@@ -14,8 +14,11 @@ def build_prompt(
     instructions = f"""
 Answer using ONLY the context below. If the question cannot be answered directly and confidently from the provided context, return the fallback.
 
-Return ONLY valid JSON with keys:
-answer, supporting_materials, explanation, citations
+Return ONLY the following plain-text fields:
+ANSWER:
+SUPPORTING_MATERIALS:
+EXPLANATION:
+CITED_CHUNK_IDS:
 
 Rules:
 - First determine whether the provided context is directly relevant to the question.
@@ -25,20 +28,17 @@ Rules:
 - Keep the answer short, factual, and grounded in the cited evidence.
 - Use chunk_id values exactly as provided in the context.
 - Do not invent document IDs, page numbers, captions, asset paths, or any other missing details.
-- citations must be a JSON array of objects with keys:
-  - chunk_id
-  - evidence_text
-  - evidence_type
-- evidence_text must be the shortest exact supporting span copied from a single context chunk.
-- evidence_type must be one of: text, table, figure.
-- Include only the most relevant citations needed to support the answer.
+- CITED_CHUNK_IDS must include ONLY the chunk_id values directly needed to support the answer.
+- Do not list candidate chunks that were not actually used.
+- Keep CITED_CHUNK_IDS empty if the fallback is used.
 - supporting_materials should be a brief evidence summary grounded only in the cited chunks.
 - explanation should briefly state why the answer is supported by the cited evidence, or why the fallback was used.
 - If fallback is used, set:
-  - answer to "{FALLBACK_ANSWER}"
-  - supporting_materials to ""
-  - citations to []
-  - explanation to "The provided context is irrelevant or insufficient to answer the question."
+  - ANSWER to "{FALLBACK_ANSWER}"
+  - SUPPORTING_MATERIALS to ""
+  - EXPLANATION to "The provided context is irrelevant or insufficient to answer the question."
+  - CITED_CHUNK_IDS to an empty list
+- Do not output JSON.
 
 Question:
 {question}
@@ -73,20 +73,14 @@ Context snippets:
 
     closing = """
 ---
-Output JSON shape:
-{
-  "answer": "string",
-  "supporting_materials": "string",
-  "explanation": "string",
-  "citations": [
-    {
-      "chunk_id": "doc_chunk_id",
-      "evidence_text": "exact supporting span",
-      "evidence_type": "text"
-    }
-  ]
-}
-JSON only.
+Output format:
+ANSWER: string
+SUPPORTING_MATERIALS: string
+EXPLANATION: string
+CITED_CHUNK_IDS:
+- doc_chunk_id
+- another_chunk_id
+Fields only.
 """
 
     return instructions + "\n".join(snippet_lines) + closing

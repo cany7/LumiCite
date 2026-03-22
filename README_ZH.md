@@ -396,9 +396,24 @@ The generated report in this run recorded:
 - 工程约束：配置加载、日志与错误类型、Docker / CI 配置约束，以及核心 schema 的字段校验
 
 ## 示例数据
-仓库提供了一份示例论文 CSV 列表`data/pdfs/sample_ai_impacts.csv`，选取了30 篇与 AI 环境影响相关的论文，可作为示例知识库输入使用
-同时提供评测数据集`data/benchmark_QA.csv`基于上述示例论文构建，用于 benchmark 流程中的召回、排序与检索延迟评估
+仓库提供了一份示例论文 CSV 列表data/pdfs/sample_ai_impacts.csv，选取了30 篇与 AI 环境影响相关的论文，可作为示例知识库输入使用
+
+同时提供评测数据集data/benchmark_QA.csv基于上述示例论文构建，用于 benchmark 流程中的召回、排序与检索延迟评估，总共包含40道测试问题
+
 示例数据基于公开发布的数据集适配，仅用于本项目的非商业研究与评测用途，对应数据仍受其原始数据许可证约束
+
+## 评测结果
+使用该评测数据集，在默认参数设置下对系统进行了完整测试，结果见[benchmark_QA_default_query_results.csv](./tests/benchmark_QA_default_query_results.csv)
+
+按“语义一致”口径统计，共得到 33 个正确答案，整体正确率为 82.5%。平均 retrieval latency 为 891 ms，平均 generation latency 为 1756 ms
+
+召回及生成过程中，会受到云端 LLM API 服务状态、测试平台计算性能等因素影响，因此延时结果仅供参考，不同运行环境可能存在较大差异
+
+对于部分在默认参数下回答失败的复杂问题，又进一步调整了 reasoning_effort、rerank 和 top_k，进行了定向补充测试。补充测试后，仅剩少量高难度问题仍无法稳定得到正确答案
+
+当前瓶颈主要集中在几类复杂问题模式上，例如：需要多表格或图像证据拼接、跨文档证据整合及推理、以及复杂计算型推理。这类问题的回答效果不仅受检索结果完整性影响，也较依赖所使用 LLM 生成模型的综合能力，后续若切换到更强的模型，仍有进一步提升空间
+
+同时，当前系统在无法准确回答这类复杂问题时，均正确返回了 fallback 结果，没有出现强行作答的情况。整体来看，系统在学术知识库场景下能够稳定地生成准确、质量较高且具备证据约束的回答，并有效规避了 AI 幻觉问题
 
 ## 下一步方向
 
@@ -406,6 +421,7 @@ The generated report in this run recorded:
 - 引入 RAGAs 等 RAG 评估框架， faithfulness、answer relevancy、context precision、context recall 等维度评估答案与证据的一致性，并进一步优化生成效果
 - 在检索与生成之间增加更精细的 context assembly 策略，在保留高相关 chunk 的基础上，引入同文档局部邻域扩展，补充相邻正文、同页图表及相关 caption/footnote，提升证据完整性，减少“主证据命中但补充证据缺失”的情况
 - 在检索与生成之间增加更精细的 context assembly 与 context filtering 策略，补充同文档局部邻域证据，减少跨文档相似噪声对生成结果的干扰
+- 加入对 query 的自动识别与分流，根据问题类型自动选择 `top_k`、`reasoning_effort`、`rerank` 等检索与生成参数
 
 ## 引用与依赖
 

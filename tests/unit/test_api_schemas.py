@@ -1,25 +1,32 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 from pydantic import ValidationError
 
+import src.api.schemas as schemas_module
 from src.api.schemas import QueryRequest, SearchRequest
 
 
-def test_search_request_defaults_follow_current_contract() -> None:
+def test_search_request_defaults_follow_current_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(schemas_module, "get_settings", lambda: SimpleNamespace(retrieval_top_k=7))
     payload = SearchRequest(question="energy consumption")
 
-    assert payload.top_k == 10
+    assert payload.top_k == 7
     assert payload.retrieval_mode is None
     assert payload.rerank is False
+    assert payload.query_explanation is True
 
 
-def test_query_request_defaults_follow_current_contract() -> None:
+def test_query_request_defaults_follow_current_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(schemas_module, "get_settings", lambda: SimpleNamespace(retrieval_top_k=9))
     payload = QueryRequest(question="what were the emissions?")
 
-    assert payload.top_k == 5
+    assert payload.top_k == 9
     assert payload.retrieval_mode is None
-    assert payload.rerank is True
+    assert payload.rerank is False
+    assert payload.query_explanation is True
     assert payload.llm_backend is None
     assert payload.llm_model is None
 

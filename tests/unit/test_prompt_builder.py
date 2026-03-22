@@ -28,5 +28,7 @@ def test_build_prompt_includes_current_context_fields_and_excludes_asset_path() 
     assert "page=8" in prompt
     assert "headings=4 Results" in prompt
     assert "caption=Figure 3. Emissions by model size" in prompt
+    assert "ANSWER:" in prompt
+    assert "CITED_CHUNK_IDS:" in prompt
     assert "data/assets" not in prompt
     assert FALLBACK_ANSWER in prompt

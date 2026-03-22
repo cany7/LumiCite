@@ -6,6 +6,13 @@ from typing import Literal
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+def normalize_reasoning_effort(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip().lower()
+    return normalized or None
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="RAG_",
@@ -24,7 +31,7 @@ class Settings(BaseSettings):
     request_retry_attempts: int = 3
     request_retry_delay_seconds: float = 3.0
 
-    retrieval_top_k: int = 5
+    retrieval_top_k: int = 10
     distance_threshold: float = 1.2
     retrieval_mode: Literal["dense", "sparse", "hybrid"] = "hybrid"
     reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
@@ -34,6 +41,7 @@ class Settings(BaseSettings):
     api_key: str = ""
     api_model: str = "qwen/qwen3.5-27b"
     api_timeout_seconds: int = 120
+    query_explanation_reasoning_effort: str = "none"
     visual_api_base_url: str = ""
     visual_api_key: str = ""
     visual_api_model: str = "qwen/qwen2.5-vl-7b-instruct"
