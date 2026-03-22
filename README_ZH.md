@@ -1,8 +1,12 @@
 [🇺🇸 English](./README.md) | [🇨🇳 简体中文](./README_ZH.md)
 
-# 学术论文多模态 RAG 系统
+[![Python](https://img.shields.io/badge/Python-3.11%2B-blue)](./pyproject.toml)
+[![License](https://img.shields.io/badge/License-AGPL--3.0-green)](./LICENSE)
+[![CI](https://github.com/cany7/LumiCite/actions/workflows/ci.yml/badge.svg)](https://github.com/cany7/LumiCite/actions/workflows/ci.yml)
 
-本项目是一个针对学术科研场景的端到端、多模态 RAG 系统，通过将学术论文中的**正文、图像与表格**统一解析为可检索语料，结合 **hybrid retrieval、reranking 与 citation-aware answering**，为学术应用提供精准的证据检索、召回与答案生成
+# LumiCite
+
+LumiCite 是一个针对学术科研场景的端到端、多模态 RAG 系统，通过将学术论文中的**正文、图像与表格**统一解析为可检索语料，结合 **hybrid retrieval、reranking 与 citation-aware answering**，为学术应用提供精准的证据检索、召回与答案生成
 
 ## 项目特点
 

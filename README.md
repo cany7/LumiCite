@@ -1,8 +1,12 @@
 [🇺🇸 English](./README.md) | [🇨🇳 简体中文](./README_ZH.md)
 
-# Multimodal RAG System for Academic Papers
+[![Python](https://img.shields.io/badge/Python-3.11%2B-blue)](./pyproject.toml)
+[![License](https://img.shields.io/badge/License-AGPL--3.0-green)](./LICENSE)
+[![CI](https://github.com/cany7/LumiCite/actions/workflows/ci.yml/badge.svg)](https://github.com/cany7/LumiCite/actions/workflows/ci.yml)
 
-This project is an end-to-end multimodal RAG system for academic paper PDFs. It parses **main text, figures, and tables** into a unified searchable corpus, then combines **hybrid retrieval, reranking, and citation-aware answer generation** to support accurate evidence retrieval, strong recall, and reliable answer synthesis for academic use cases.
+# LumiCite
+
+LumiCite is an end-to-end multimodal RAG system for academic paper PDFs. It parses **main text, figures, and tables** into a unified searchable corpus, then combines **hybrid retrieval, reranking, and citation-aware answer generation** to support accurate evidence retrieval, strong recall, and reliable answer synthesis for academic use cases.
 
 ## Highlights
 
@@ -446,4 +450,4 @@ This project is built on the following open-source frameworks and components:
 
 ## License
 
-This project is released under the AGPL-3.0 license, aligning with the licensing requirements of dependencies such as MinerU. This license does not apply to the papers and benchmark datasets in the example data, which remain subject to their original data license (CC BY-NC 4.0).
+This project is released under the **AGPL-3.0** license, aligning with the licensing requirements of dependencies (MinerU). This license does not apply to the papers and benchmark datasets in the example data, which remain subject to their original data license **CC BY-NC 4.0**.
