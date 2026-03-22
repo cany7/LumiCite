@@ -6,14 +6,13 @@ This project is an end-to-end multimodal RAG system for academic paper PDFs. It 
 
 ## Highlights
 
-- **Background:** Academic papers often distribute essential evidence across figures and tables. Conventional RAG systems that depend solely on plain-text parsing can therefore miss important information and produce incomplete answers.
-- **Limitations of Image Embedding Models:** Multimodal embedding models that jointly encode text and images can partially address this issue, but they still have limited ability to represent comparisons, trends, and structural relationships in charts and tables, which makes precise answering difficult.
-- **Unified Multimodal Corpus:** This project represents main text, figures, and tables as a unified searchable corpus under a unified chunk schema, allowing different evidence types to participate in the same indexing and retrieval pipeline and improving both retrieval accuracy and answer generation.
-- **Hybrid Retrieval Mechanism:** Academic retrieval requires both semantic recall and exact matching for key terms, metrics, and domain-specific terminology. To support both, the system combines a `FAISS` dense index with a `BM25` sparse index and provides multiple retrieval modes.
-- **Dual-Path Retrieval and Reranking Optimization:** To better handle dense academic writing and semantically similar concepts, the system adopts dual-path retrieval, merges candidates with `RRF`, and applies a cross-encoder reranker for final ranking, improving overall retrieval quality and precision.
-- **Multi-Interface Support:** To support different deployment scenarios, the project provides both a CLI and an HTTP API, covering local use as well as service-oriented deployment.
-- **Offline Deployment Environment Support:** By default, answer generation uses a standard LLM API. The system can also switch to containerized `ollama` as a local LLM backend for restricted environments such as offline or internal-network deployments. This switch applies to both query generation and the visual summary step during ingestion.
-- **Multiple Input Source Support:** The system supports three input sources: `local_dir`, `url_csv`, and `url_list`, covering both local PDF ingestion and batch import from URLs.
+- **Multimodal Evidence Modeling:** Parses main text, figures, and tables from papers into unified searchable evidence, addressing the issue where text-only RAG misses information and pure image embeddings fail to capture deep structural details like comparisons and trends.
+- **Hybrid Retrieval Mechanism:** Combines `FAISS` vector index with `BM25` sparse index to support both semantic recall and exact keyword/metric matching, covering complex academic retrieval scenarios.
+- **Query Explanation Enhanced Retrieval:** Applies query explanation/expansion before retrieval to handle implicit conditions, unit conversions, and missing baselines, improving recall for complex academic questions.
+- **Dual-Path Retrieval and Reranking Optimization:** Uses dual-path retrieval with `RRF` fusion, followed by cross-encoder reranking to improve precision and reduce noise from semantically similar or dense text.
+- **Multi-Interface Support:** Provides both CLI and HTTP API interfaces to support local usage and service-oriented deployment strategies.
+- **Switchable LLM Backend:** Supports standard LLM APIs and can switch to a containerized `ollama` local backend, suitable for restricted environments like offline or internal networks.
+- **Multiple Input Source Support:** Supports three input sources: `local_dir`, `url_csv`, and `url_list`, covering local PDF ingestion and batch URL import.
 
 ## System Architecture Overview
 
@@ -87,14 +86,6 @@ For the first run, it is recommended to initialize the system in the following o
 2. Run `rag parse` to download the required models, perform ingestion, generate embeddings, and build indexes
 3. Use `rag search` or `rag query` for retrieval and QA
 
-Examples:
-
-```bash
-uv run rag parse --source local_dir --path data/pdfs/
-uv run rag search "energy consumption of GPT-3" --top-k 5
-uv run rag query "What were the CO2 emissions from training GPT-3?"
-```
-
 ## CLI Usage
 
 ### `rag parse`
@@ -130,11 +121,29 @@ Common arguments:
 - `--dry-run`
   - Print the execution plan without actually running it
 
-Examples:
+Example:
 
 ```bash
 uv run rag parse --source local_dir --path data/pdfs/
-uv run rag parse --source local_dir --path data/pdfs/ --llm ollama
+```
+
+Example result:
+
+```json
+{
+  "event": "parse_summary",
+  "status": "ok",
+  "source": "local_dir",
+  "device": "cpu",
+  "processed_pdfs": 0,
+  "failed_pdfs": 0,
+  "skipped_pdfs": 30,
+  "pruned_pdfs": 0,
+  "chunks_written": 3113,
+  "embeddings_written": 3113,
+  "rebuild_index": false,
+  "indices_rebuilt": false
+}
 ```
 
 ### `rag search`
@@ -143,19 +152,23 @@ uv run rag parse --source local_dir --path data/pdfs/ --llm ollama
 
 Default options:
 
-- `--top-k 10`
+- `--top-k 10` (or `RAG_RETRIEVAL_TOP_K`)
 - `--retrieval-mode hybrid`
 - `--no-rerank`
+- `--query-explanation`
 - `--output-format json`
 
 Common arguments:
 
 - `--top-k`
-  - A positive integer specifying how many top results to return
+  - A positive integer specifying how many top results to return; if omitted, the CLI uses `RAG_RETRIEVAL_TOP_K` (default `10`)
 - `--retrieval-mode`
   - Options: `dense`, `sparse`, `hybrid`
 - `--rerank` / `--no-rerank`
-  - Whether to enable reranking; enabling it improves result quality but reduces speed
+  - Whether to enable reranking; enabling it improves result quality but reduces speed. When enabled, retrieval fetches `top_k * 5` candidates first, reranks them, and keeps the final `top_k`
+- `--query-explanation` / `--no-query-explanation`
+  - Optionally rewrite the original question into a retrieval-oriented expanded query before retrieval; the expanded query is used only to improve recall and is fused with the original query's candidates before reranking
+  - Query explanation reasoning does not use `--reasoning-effort`, but is controlled only by `RAG_QUERY_EXPLANATION_REASONING_EFFORT` in `.env` (default `none`)
 - `--output-format`
   - Options: `json`, `table`
 
@@ -165,44 +178,75 @@ Example:
 uv run rag search "energy consumption of PaLM 540B" --top-k 10
 ```
 
+Example result:
+
+- The command returned a JSON payload with `total_results: 10`, `retrieval_mode: "hybrid"`, and `retrieval_latency_ms: 3263.582`.
+- The top hits mixed text and figure chunks, including passages about real-world AI service energy consumption and figures mentioning PaLM (540B), GPT-3, Gemini, and hardware or energy cost trends.
+
 ### `rag query`
 
-`rag query` generates the final answer from retrieval results and returns a citation-grounded response. It is intended for paper QA, evidence localization, and result export. By default, it uses `hybrid` retrieval with reranking enabled.
+`rag query` generates the final answer from retrieval results and returns a citation-grounded response. It is intended for paper QA, evidence localization, and result export. By default, it uses `hybrid` retrieval with query explanation enabled and reranking disabled, the final citations are built only from the retrieved chunks selected by the generation step, and the CLI prints a human-readable answer.
 
 Default options:
 
-- `--top-k 5`
+- `--top-k 10` (or `RAG_RETRIEVAL_TOP_K`)
 - `--retrieval-mode hybrid`
-- `--rerank`
+- `--no-rerank`
+- `--query-explanation`
 - `--llm api`
+- `--reasoning-effort none`
 
 Common arguments:
 
 - `--top-k`
-  - A positive integer specifying how many retrieved results are used for answer generation
+  - A positive integer specifying how many retrieved results are provided as candidates for answer generation; if omitted, the CLI uses `RAG_RETRIEVAL_TOP_K` (default `10`)
 - `--retrieval-mode`
   - Options: `dense`, `sparse`, `hybrid`
 - `--rerank` / `--no-rerank`
-  - Whether to enable reranking
+  - Whether to enable reranking. When enabled, retrieval fetches `top_k * 5` candidates first, reranks them, and keeps the final `top_k` that are sent to generation
+- `--query-explanation` / `--no-query-explanation`
+  - Optionally rewrite the original question into a retrieval-oriented expanded query before retrieval; the expanded query is used only to improve recall and is fused with the original query's candidates before reranking
 - `--llm`
   - Options: `api`, `ollama`
 - `--model`
   - Model name; only effective when `--llm api` is used
+- `--reasoning-effort`
+  - Options: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`; only effective when `--llm api` is used, and defaults to `none`
+  - This parameter only affects final answer generation, not query explanation
 - `--output`
-  - Output file path such as `answer.json`
+  - Output file path such as `answer.txt` or `answer.json`
+- `--output-format`
+  - Options: `text`, `json`; defaults to `text`
+- `--json`
+  - Shortcut for `--output-format json`, returns unprocessed JSON structured text for testing purposes
 - `ollama` model
   - By default, the system automatically deploys and pulls the containerized `qwen3.5:4b` model. You can switch to a different model via `RAG_OLLAMA_MODEL`
 
-Examples:
+Example:
 
 ```bash
 uv run rag query "What were the CO2 emissions from training GPT-3?"
-uv run rag query "What were the CO2 emissions from training GPT-3?" --llm ollama
+```
+
+Example result:
+
+```text
+Question
+What were the CO2 emissions from training GPT-3?
+
+Answer
+The provided context does not state a single specific CO2 emission value for training GPT-3, but it cites several estimates, including approximately 0.5 million kg of CO2e for GPT-3 training.
+
+Evidence
+- Chunk [2] estimates GPT-3 training time at over 3.5 million hours.
+- Chunk [3] states GPT-3's carbon footprint for training is approximately 0.5 million kg.
 ```
 
 ### `rag serve`
 
 `rag serve` starts the project's HTTP API. It is suitable for local debugging, API integration, and service deployment. By default, it listens on `0.0.0.0:8000`.
+
+The HTTP API's `POST /api/v1/search` and `POST /api/v1/query` requests also accept `query_explanation: true` to enable the same retrieval-oriented query expansion used by the CLI.
 
 Default options:
 
@@ -228,14 +272,15 @@ uv run rag serve --host 0.0.0.0 --port 8000
 
 `rag benchmark` runs the project evaluation pipeline. At the current stage, it primarily evaluates retrieval quality and retrieval performance by comparing recall and ranking behavior across different retrieval modes, top-k settings, and rerank configurations, while also reporting retrieval latency.
 
-Evaluation results are recorded at the question level, including core metrics such as `recall_at_k`, `mrr`, `ndcg_at_k`, `mean_retrieval_latency_ms`, and `p95_retrieval_latency_ms`. By default, benchmarking runs with `hybrid` retrieval and reranking enabled.
+Evaluation results are recorded at the question level, including core metrics such as `recall_at_k`, `mrr`, `ndcg_at_k`, `mean_retrieval_latency_ms`, and `p95_retrieval_latency_ms`. By default, benchmarking runs with `hybrid` retrieval, query explanation enabled, and reranking disabled.
 
 Default options:
 
 - `--dataset data/train_QA.csv`
 - `--retrieval-mode hybrid`
-- `--top-k 5`
-- `--rerank`
+- `--top-k 10` (or `RAG_RETRIEVAL_TOP_K`)
+- `--no-rerank`
+- `--query-explanation`
 - `--output-dir data/benchmark_results/`
 - `--tag run`
 
@@ -246,9 +291,11 @@ Common arguments:
 - `--retrieval-mode`
   - Options: `dense`, `sparse`, `hybrid`
 - `--top-k`
-  - A positive integer specifying how many results are retrieved during evaluation
+  - A positive integer specifying how many results are retrieved during evaluation; if omitted, the CLI uses `RAG_RETRIEVAL_TOP_K` (default `10`)
 - `--rerank` / `--no-rerank`
-  - Whether to enable reranking
+  - Whether to enable reranking. When enabled, retrieval fetches `top_k * 5` candidates first, reranks them, and keeps the final `top_k`
+- `--query-explanation` / `--no-query-explanation`
+  - Optionally rewrite each benchmark question into a retrieval-oriented expanded query before retrieval; the expanded query is used only to improve recall and is fused with the original query's candidates before reranking
 - `--output-dir`
   - Output directory such as `data/benchmark_results/`
 - `--tag`
@@ -265,6 +312,23 @@ Example:
 ```bash
 uv run rag benchmark --dataset data/benchmark_QA.csv --tag smoke
 ```
+
+Example result:
+
+```json
+{
+  "report": "data/benchmark_results/smoke_20260322_175009_report.json",
+  "summary": "data/benchmark_results/smoke_20260322_175009_summary.csv"
+}
+```
+
+The generated report in this run recorded:
+
+- `num_questions: 41`
+- `recall_at_k: 0.8537`
+- `mrr: 0.8049`
+- `ndcg_at_k: 0.8177`
+- `mean_retrieval_latency_ms: 473.535`
 
 ## Data and Pipeline Schema
 
@@ -361,7 +425,8 @@ This project is built on the following open-source frameworks and components:
 - [Typer](https://typer.tiangolo.com/): used to build the CLI
 - [Uvicorn](https://www.uvicorn.org/): used to run the HTTP service
 - [uv](https://docs.astral.sh/uv/): used for Python dependency management and command execution
+- [WattBot 25](https://www.kaggle.com/competitions/WattBot2025/overview): source of the paper list and benchmark dataset in the example data
 
 ## License
 
-This project is released under the AGPL-3.0 license, consistent with the license requirements of related dependencies used in the project, including MinerU.
+This project is released under the AGPL-3.0 license, consistent with the license requirements of related dependencies used in the project, including MinerU. This license does not apply to the papers and benchmark datasets in the example data, which remain subject to their original data license (CC BY-NC 4.0).
