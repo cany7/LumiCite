@@ -10,8 +10,9 @@ from src.ingestion.embedder import embed_local, load_canonical_chunks_jsonl, wri
 
 
 class _FakeSentenceTransformer:
-    def __init__(self, model_name: str) -> None:
+    def __init__(self, model_name: str, cache_folder: str | None = None, **kwargs) -> None:  # noqa: ANN003
         self.model_name = model_name
+        self.cache_folder = cache_folder
 
     def encode(self, texts, convert_to_numpy=True, show_progress_bar=False):  # noqa: ANN001
         assert convert_to_numpy is True

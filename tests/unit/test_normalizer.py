@@ -5,10 +5,10 @@ from src.generation.llm_client import normalize_generation_payload, parse_json_r
 from src.generation.rag_pipeline import _normalize_answer_payload
 
 
-def test_parse_json_response_strips_markdown_fences():
+def test_parse_json_response_strips_markdown_fences() -> None:
     payload = parse_json_response(
         """```json
-{"answer":"552 tCO2e","answer_value":"552","answer_unit":"tCO2e","ref_id":"patterson2021","supporting_materials":"evidence","explanation":"because","citations":[]}
+{"answer":"552 tCO2e","supporting_materials":"evidence","explanation":"because","citations":[]}
 ```"""
     )
 
@@ -16,54 +16,50 @@ def test_parse_json_response_strips_markdown_fences():
     assert payload["answer"] == "552 tCO2e"
 
 
-def test_normalize_generation_payload_coerces_ref_id_to_list():
+def test_normalize_generation_payload_preserves_current_fields() -> None:
     payload = normalize_generation_payload(
         {
             "answer": "TRUE",
-            "answer_value": "1",
-            "answer_unit": "",
-            "ref_id": "paper1",
             "supporting_materials": "evidence",
             "explanation": "because",
             "citations": [],
         }
     )
 
-    assert payload["ref_id"] == ["paper1"]
+    assert payload["answer"] == "TRUE"
     assert payload["citations"] == []
 
 
-def test_normalize_answer_payload_backfills_grounded_fields():
+def test_normalize_answer_payload_backfills_grounded_fields() -> None:
     normalized = _normalize_answer_payload(
         {
             "answer": "552 tCO2e",
-            "answer_value": "",
-            "answer_unit": "tCO2e",
-            "ref_id": [],
             "supporting_materials": "",
             "explanation": "",
-            "citations": [],
+            "citations": [{"chunk_id": "patterson2021_aaaabbbb"}],
         },
         contexts=[
             {
-                "ref_id": "patterson2021",
+                "doc_id": "patterson2021",
+                "chunk_id": "patterson2021_aaaabbbb",
                 "text": "Training GPT-3 resulted in 552 tCO2e according to Patterson et al.",
-                "page": 8,
+                "page_number": 8,
                 "chunk_type": "text",
+                "headings": ["4 Results"],
+                "caption": "",
+                "asset_path": "",
             }
         ],
     )
 
     assert normalized["answer"] == "552 tCO2e"
-    assert normalized["answer_value"] == "552 tCO2e"
-    assert normalized["ref_id"] == ["patterson2021"]
-    assert normalized["supporting_materials"] == "is_blank"
-    assert normalized["citations"][0].ref_id == "patterson2021"
+    assert normalized["supporting_materials"] == "Training GPT-3 resulted in 552 tCO2e according to Patterson et al."
+    assert normalized["citations"][0].chunk_id == "patterson2021_aaaabbbb"
+    assert normalized["citations"][0].doc_id == "patterson2021"
 
 
-def test_normalize_answer_payload_returns_fallback_for_blank_answer():
+def test_normalize_answer_payload_returns_fallback_for_blank_answer() -> None:
     normalized = _normalize_answer_payload({"answer": " ", "citations": []}, contexts=[])
 
     assert normalized["answer"] == FALLBACK_ANSWER
-    assert normalized["answer_value"] == "is_blank"
-    assert normalized["ref_id"] == []
+    assert normalized["citations"] == []

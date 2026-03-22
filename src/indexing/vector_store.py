@@ -11,16 +11,9 @@ import numpy as np
 
 from src.config.settings import get_settings
 from src.core.logging import get_logger
-from src.core.paths import find_project_root
+from src.core.paths import embeddings_jsonl_path, faiss_index_path, faiss_metadata_path, faiss_text_data_path, find_project_root
 
 logger = get_logger(__name__)
-
-
-def locate_embeddings_file(root_dir: Path) -> Path:
-    json_dir = root_dir / "data" / "JSON"
-    json_dir.mkdir(parents=True, exist_ok=True)
-    return json_dir / "embeddings.jsonl"
-
 
 def _file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
@@ -39,12 +32,11 @@ class FaissStore:
         embedding_model: str | None = None,
     ) -> None:
         root = find_project_root()
-        data_dir = root / "data"
         settings = get_settings()
-        self.index_path = index_path or data_dir / "my_faiss.index"
-        self.text_data_path = text_data_path or data_dir / "text_data.pkl"
-        self.embeddings_path = embeddings_path or locate_embeddings_file(root)
-        self.metadata_path = data_dir / "my_faiss.meta.json"
+        self.index_path = index_path or faiss_index_path(root)
+        self.text_data_path = text_data_path or faiss_text_data_path(root)
+        self.embeddings_path = embeddings_path or embeddings_jsonl_path(root)
+        self.metadata_path = faiss_metadata_path(root)
         self.embedding_model = embedding_model or settings.embedding_model
         self.index: faiss.Index | None = None
         self.text_data: list[dict[str, Any]] = []

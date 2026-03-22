@@ -15,7 +15,6 @@ class DocumentMeta:
     filename: str
     local_path: Path | None = None
     url: str = ""
-    title: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def candidate_path(self, dest_dir: Path) -> Path:
@@ -35,6 +34,19 @@ class BaseSource(ABC):
             return path
         project_relative = self.root / path
         return project_relative if project_relative.exists() else path
+
+    def _resolve_default_input_file(self, pattern: str, *, label: str) -> Path:
+        search_dir = self.root / "data" / "pdfs"
+        matches = sorted(path for path in search_dir.glob(pattern) if path.is_file())
+        if not matches:
+            raise FileNotFoundError(f"No {label} file found in {search_dir}")
+        if len(matches) > 1:
+            matched = ", ".join(path.name for path in matches)
+            raise FileNotFoundError(
+                f"Multiple {label} files found in {search_dir}: {matched}. "
+                "Please pass --path to choose one."
+            )
+        return matches[0]
 
     @abstractmethod
     def discover(self) -> list[DocumentMeta]:

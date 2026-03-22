@@ -4,25 +4,17 @@ import hashlib
 import json
 import os
 from dataclasses import dataclass
-from datetime import datetime
-from importlib.metadata import PackageNotFoundError, version
+from datetime import datetime, timezone
 from pathlib import Path
 
 from src.core.schemas import ManifestEntry
 
 
 def _now_utc() -> str:
-    return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
-def _parser_version() -> str:
-    try:
-        return f"docling-{version('docling')}"
-    except PackageNotFoundError:
-        return "docling-unknown"
-
-
-def _file_sha256(path: Path) -> str:
+def file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
@@ -72,16 +64,17 @@ class Manifest:
     def get(self, doc_id: str) -> ManifestEntry | None:
         return self.entries.get(doc_id)
 
+    def stale_doc_ids(self, snapshot_doc_ids: set[str]) -> set[str]:
+        return set(self.entries) - set(snapshot_doc_ids)
+
     def should_process(
         self,
         doc_id: str,
         pdf_path: Path,
         *,
-        chunk_strategy: str,
-        embedding_model: str,
         retry_failed_only: bool = False,
     ) -> ManifestDecision:
-        content_hash = _file_sha256(pdf_path)
+        content_hash = file_sha256(pdf_path)
         file_size_bytes = pdf_path.stat().st_size
         entry = self.entries.get(doc_id)
 
@@ -96,10 +89,6 @@ class Manifest:
             return ManifestDecision(True, "previous_failed", content_hash, file_size_bytes)
         if entry.content_hash != content_hash:
             return ManifestDecision(True, "content_changed", content_hash, file_size_bytes)
-        if entry.chunk_strategy != chunk_strategy:
-            return ManifestDecision(True, "chunk_strategy_changed", content_hash, file_size_bytes)
-        if entry.embedding_model != embedding_model:
-            return ManifestDecision(True, "embedding_model_changed", content_hash, file_size_bytes)
         return ManifestDecision(False, "skipped", content_hash, file_size_bytes)
 
     def set_complete(
@@ -108,23 +97,21 @@ class Manifest:
         *,
         content_hash: str,
         file_size_bytes: int,
-        chunk_strategy: str,
         num_chunks: int,
         embedding_model: str,
         parsed_at: str | None = None,
         embedded_at: str | None = None,
     ) -> None:
-        parsed_at = parsed_at or _now_utc()
-        embedded_at = embedded_at or parsed_at
+        parsed_at_value = parsed_at or _now_utc()
+        embedded_at_value = embedded_at or parsed_at_value
         self.entries[doc_id] = ManifestEntry(
+            doc_id=doc_id,
             content_hash=content_hash,
             file_size_bytes=file_size_bytes,
-            parsed_at=parsed_at,
-            parser_version=_parser_version(),
-            chunk_strategy=chunk_strategy,
+            parsed_at=parsed_at_value,
             num_chunks=num_chunks,
             embedding_model=embedding_model,
-            embedded_at=embedded_at,
+            embedded_at=embedded_at_value,
             status="complete",
             error_message="",
         )
@@ -135,20 +122,33 @@ class Manifest:
         *,
         content_hash: str,
         file_size_bytes: int,
-        chunk_strategy: str,
         embedding_model: str,
         error_message: str,
     ) -> None:
         timestamp = _now_utc()
         self.entries[doc_id] = ManifestEntry(
+            doc_id=doc_id,
             content_hash=content_hash,
             file_size_bytes=file_size_bytes,
             parsed_at=timestamp,
-            parser_version=_parser_version(),
-            chunk_strategy=chunk_strategy,
             num_chunks=0,
             embedding_model=embedding_model,
             embedded_at=timestamp,
             status="failed",
             error_message=error_message,
         )
+
+    def remove(self, doc_id: str) -> None:
+        self.entries.pop(doc_id, None)
+
+    def update_embeddings(self, embedding_model: str, *, embedded_at: str | None = None) -> None:
+        timestamp = embedded_at or _now_utc()
+        for doc_id, entry in list(self.entries.items()):
+            if entry.status != "complete":
+                continue
+            self.entries[doc_id] = entry.model_copy(
+                update={
+                    "embedding_model": embedding_model,
+                    "embedded_at": timestamp,
+                }
+            )

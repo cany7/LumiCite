@@ -23,7 +23,7 @@ def _now_utc() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
-def _parse_ref_ids(value: object) -> list[str]:
+def _parse_ref_doc_ids(value: object) -> list[str]:
     if value is None:
         return []
     text = str(value).strip()
@@ -96,13 +96,13 @@ class Evaluator:
             question = str(row.get("question", "")).strip()
             if not question:
                 continue
-            relevant_ref_ids = _parse_ref_ids(row.get("ref_id"))
+            relevant_ref_doc_ids = _parse_ref_doc_ids(row.get("ref_doc_id"))
             results, latency_ms = self._retrieve(question)
-            retrieved_ref_ids = [str(item.get("ref_id", "")).strip() for item in results if item.get("ref_id")]
+            retrieved_doc_ids = [str(item.get("doc_id", "")).strip() for item in results if item.get("doc_id")]
 
-            recall_value = recall_at_k(retrieved_ref_ids, relevant_ref_ids, self.top_k)
-            mrr_value = mrr(retrieved_ref_ids, relevant_ref_ids)
-            ndcg_value = ndcg_at_k(retrieved_ref_ids, relevant_ref_ids, self.top_k)
+            recall_value = recall_at_k(retrieved_doc_ids, relevant_ref_doc_ids, self.top_k)
+            mrr_value = mrr(retrieved_doc_ids, relevant_ref_doc_ids)
+            ndcg_value = ndcg_at_k(retrieved_doc_ids, relevant_ref_doc_ids, self.top_k)
 
             recall_scores.append(recall_value)
             mrr_scores.append(mrr_value)
@@ -110,10 +110,10 @@ class Evaluator:
             latencies.append(latency_ms)
             per_question.append(
                 {
-                    "id": str(row.get("id", "")),
+                    "question_id": str(row.get("question_id", "")),
                     "question": question,
-                    "relevant_ref_ids": relevant_ref_ids,
-                    "retrieved_ref_ids": retrieved_ref_ids,
+                    "relevant_ref_doc_ids": relevant_ref_doc_ids,
+                    "retrieved_doc_ids": retrieved_doc_ids,
                     "recall_at_k": recall_value,
                     "mrr": mrr_value,
                     "ndcg_at_k": ndcg_value,

@@ -1,19 +1,20 @@
 from __future__ import annotations
 
 import json
-import os
 import re
-import warnings
+import subprocess
+import time
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import Any
 
 import requests
 
 from src.config.settings import get_settings
 from src.core.constants import FALLBACK_ANSWER
-from src.core.logging import get_logger, timed
-
-warnings.filterwarnings("ignore", category=UserWarning, module="google.cloud.aiplatform.initializer")
+from src.core.errors import GenerationError, OllamaReadyError
+from src.core.logging import get_logger, report_error, timed
+from src.core.paths import find_project_root
 
 logger = get_logger(__name__)
 JSON_FENCE_RE = re.compile(r"^```[a-zA-Z]*\n([\s\S]*?)\n```$", re.MULTILINE)
@@ -22,9 +23,6 @@ JSON_FENCE_RE = re.compile(r"^```[a-zA-Z]*\n([\s\S]*?)\n```$", re.MULTILINE)
 def fallback_generation_payload() -> dict[str, Any]:
     return {
         "answer": FALLBACK_ANSWER,
-        "answer_value": "is_blank",
-        "answer_unit": "is_blank",
-        "ref_id": [],
         "supporting_materials": "is_blank",
         "explanation": "is_blank",
         "citations": [],
@@ -69,9 +67,6 @@ def normalize_generation_payload(data: dict[str, Any]) -> dict[str, Any]:
     payload.update(
         {
             "answer": str(data.get("answer", payload["answer"]) or payload["answer"]).strip(),
-            "answer_value": data.get("answer_value", payload["answer_value"]),
-            "answer_unit": str(data.get("answer_unit", payload["answer_unit"]) or payload["answer_unit"]).strip(),
-            "ref_id": data.get("ref_id", payload["ref_id"]),
             "supporting_materials": str(
                 data.get("supporting_materials", payload["supporting_materials"]) or payload["supporting_materials"]
             ).strip(),
@@ -80,32 +75,10 @@ def normalize_generation_payload(data: dict[str, Any]) -> dict[str, Any]:
         }
     )
 
-    if isinstance(payload["ref_id"], str):
-        payload["ref_id"] = [payload["ref_id"]]
-    if not isinstance(payload["ref_id"], list):
-        payload["ref_id"] = []
-
     if not isinstance(payload["citations"], list):
         payload["citations"] = []
 
     return payload
-
-
-def extract_vertex_response_text(response: Any) -> str:
-    if not response:
-        return ""
-    if hasattr(response, "text") and response.text:
-        return str(response.text).strip()
-
-    candidates = getattr(response, "candidates", []) or []
-    for candidate in candidates:
-        content = getattr(candidate, "content", None)
-        parts = getattr(content, "parts", []) if content else []
-        texts = [str(part.text).strip() for part in parts if getattr(part, "text", None)]
-        if texts:
-            return "\n".join(texts).strip()
-
-    return ""
 
 
 class LLMClient(ABC):
@@ -114,64 +87,121 @@ class LLMClient(ABC):
         raise NotImplementedError
 
 
-class GeminiClient(LLMClient):
+def extract_chat_response_text(response: Any) -> str:
+    choices = getattr(response, "choices", None) or []
+    if not choices:
+        return ""
+
+    message = getattr(choices[0], "message", None)
+    if message is None:
+        return ""
+
+    content = getattr(message, "content", None)
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        texts: list[str] = []
+        for part in content:
+            if isinstance(part, dict):
+                text = str(part.get("text", "")).strip()
+            else:
+                text = str(getattr(part, "text", "")).strip()
+            if text:
+                texts.append(text)
+        return "\n".join(texts).strip()
+    return ""
+
+
+class APIClient(LLMClient):
     def __init__(
         self,
         model: str | None = None,
-        project: str | None = None,
-        location: str | None = None,
-        credentials_path: str | None = None,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        temperature: float = 0.0,
+        timeout: int | None = None,
     ) -> None:
         settings = get_settings()
-        self.model_name = model or settings.gemini_model
-        self.project = project or settings.gcp_project
-        self.location = location or settings.gcp_location
-        self.credentials_path = credentials_path or settings.gcp_credentials_path
+        self.model_name = model or settings.api_model
+        self.api_key = (api_key if api_key is not None else settings.api_key).strip()
+        self.base_url = (base_url if base_url is not None else settings.api_base_url).strip()
+        self.temperature = temperature
+        self.timeout = timeout or settings.api_timeout_seconds
         self._client: Any | None = None
 
     def _load_client(self) -> Any | None:
         if self._client is not None:
             return self._client
 
-        if self.credentials_path:
-            if os.path.exists(self.credentials_path):
-                os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = self.credentials_path
-            else:
-                logger.warning("gemini_credentials_missing", path=self.credentials_path)
-                return None
+        if not self.api_key:
+            raise GenerationError(
+                error_type="api_key_missing",
+                message="API key is required for generation",
+                retryable=False,
+                context={"model": self.model_name},
+            )
 
         try:
-            import vertexai
-            from vertexai.generative_models import GenerativeModel
-        except ImportError:
-            logger.warning("gemini_sdk_missing")
-            return None
+            from openai import OpenAI
+        except ImportError as exc:
+            raise GenerationError(
+                error_type="sdk_missing",
+                message="OpenAI SDK is not installed",
+                retryable=False,
+                context={"model": self.model_name},
+            ) from exc
 
         try:
-            vertexai.init(project=self.project, location=self.location)
-            self._client = GenerativeModel(self.model_name)
+            self._client = OpenAI(
+                api_key=self.api_key,
+                base_url=self.base_url or None,
+                timeout=self.timeout,
+            )
         except Exception as exc:
-            logger.warning("gemini_client_init_failed", error=str(exc), model=self.model_name)
-            self._client = None
+            raise GenerationError(
+                error_type="client_init_failed",
+                message=str(exc),
+                retryable=False,
+                context={"model": self.model_name},
+            ) from exc
 
         return self._client
 
     @timed("generate")
     def generate(self, prompt: str) -> str:
         client = self._load_client()
-        if client is None:
-            return fallback_generation_json()
 
         try:
-            response = client.generate_content(prompt, generation_config={"temperature": 0.0})
+            response = client.chat.completions.create(
+                model=self.model_name,
+                temperature=self.temperature,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You answer RAG questions using only supplied evidence. "
+                            "Return a JSON object only."
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+            )
         except Exception as exc:
-            logger.warning("gemini_generate_failed", error=str(exc), model=self.model_name)
-            return fallback_generation_json()
+            raise GenerationError(
+                error_type="generation_request_error",
+                message=str(exc),
+                retryable=True,
+                context={"model": self.model_name},
+            ) from exc
 
-        text = extract_vertex_response_text(response)
+        text = extract_chat_response_text(response)
         if not text:
-            logger.warning("gemini_generate_empty", model=self.model_name)
-            return fallback_generation_json()
+            raise GenerationError(
+                error_type="generation_empty_output",
+                message=f"Generation returned empty output for model {self.model_name}",
+                retryable=True,
+                context={"model": self.model_name},
+            )
         return text
 
 
@@ -185,7 +215,7 @@ class OllamaClient(LLMClient):
     ) -> None:
         settings = get_settings()
         self.base_url = (base_url or settings.ollama_base_url).rstrip("/")
-        self.model_name = model
+        self.model_name = model or settings.ollama_model or None
         self.temperature = temperature
         self.timeout = timeout
 
@@ -196,14 +226,39 @@ class OllamaClient(LLMClient):
         try:
             response = requests.get(f"{self.base_url}/api/tags", timeout=5)
             response.raise_for_status()
-            models = response.json().get("models", [])
+            payload = response.json()
+            if not isinstance(payload, dict):
+                raise ValueError("Ollama tags response must be a JSON object")
+            models = payload.get("models", [])
+        except requests.Timeout as exc:
+            raise GenerationError(
+                error_type="ollama_timeout",
+                message=str(exc),
+                retryable=True,
+                context={"base_url": self.base_url},
+            ) from exc
         except requests.RequestException as exc:
-            logger.warning("ollama_model_discovery_failed", error=str(exc), base_url=self.base_url)
-            return None
+            raise GenerationError(
+                error_type="ollama_request_error",
+                message=str(exc),
+                retryable=True,
+                context={"base_url": self.base_url},
+            ) from exc
+        except ValueError as exc:
+            raise GenerationError(
+                error_type="ollama_parse_error",
+                message=str(exc),
+                retryable=True,
+                context={"base_url": self.base_url},
+            ) from exc
 
         if not models:
-            logger.warning("ollama_no_models_available", base_url=self.base_url)
-            return None
+            raise GenerationError(
+                error_type="ollama_request_error",
+                message="No Ollama models are available",
+                retryable=False,
+                context={"base_url": self.base_url},
+            )
 
         self.model_name = str(models[0].get("name", "")).strip() or None
         return self.model_name
@@ -212,7 +267,12 @@ class OllamaClient(LLMClient):
     def generate(self, prompt: str) -> str:
         model_name = self._resolve_model_name()
         if not model_name:
-            return fallback_generation_json()
+            raise GenerationError(
+                error_type="ollama_request_error",
+                message="Could not resolve an Ollama model",
+                retryable=False,
+                context={"base_url": self.base_url},
+            )
 
         try:
             response = requests.post(
@@ -228,27 +288,167 @@ class OllamaClient(LLMClient):
                 timeout=self.timeout,
             )
             response.raise_for_status()
+        except requests.Timeout as exc:
+            raise GenerationError(
+                error_type="ollama_timeout",
+                message=str(exc),
+                retryable=True,
+                context={"model": model_name, "base_url": self.base_url},
+            ) from exc
         except requests.RequestException as exc:
-            logger.warning("ollama_generate_failed", error=str(exc), model=model_name, base_url=self.base_url)
-            return fallback_generation_json()
+            raise GenerationError(
+                error_type="ollama_request_error",
+                message=str(exc),
+                retryable=True,
+                context={"model": model_name, "base_url": self.base_url},
+            ) from exc
 
-        text = str(response.json().get("response", "")).strip()
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise GenerationError(
+                error_type="ollama_parse_error",
+                message=str(exc),
+                retryable=True,
+                context={"model": model_name, "base_url": self.base_url},
+            ) from exc
+
+        text = str(payload.get("response", "")).strip()
         if not text:
-            logger.warning("ollama_generate_empty", model=model_name, base_url=self.base_url)
-            return fallback_generation_json()
+            raise GenerationError(
+                error_type="ollama_empty_output",
+                message=f"Ollama returned empty output for model {model_name}",
+                retryable=True,
+                context={"model": model_name, "base_url": self.base_url},
+            )
         return text
 
 
-def create_llm_client(backend: str | None = None) -> LLMClient:
+def _ollama_status(base_url: str, model_name: str | None = None) -> tuple[bool, str | None]:
+    try:
+        response = requests.get(f"{base_url.rstrip('/')}/api/tags", timeout=5)
+        response.raise_for_status()
+        payload = response.json()
+    except requests.RequestException:
+        return False, "ollama_unavailable"
+    except ValueError:
+        return False, "ollama_parse_error"
+
+    if not isinstance(payload, dict):
+        return False, "ollama_parse_error"
+
+    if not model_name:
+        return True, None
+
+    normalized_model = model_name.strip()
+    models = payload.get("models", [])
+    if not isinstance(models, list):
+        return False, "ollama_parse_error"
+
+    for item in models:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name", "")).strip()
+        if name == normalized_model:
+            return True, None
+    return False, "ollama_model_missing"
+
+
+def _ollama_ready(base_url: str, model_name: str | None = None) -> bool:
+    ready, _ = _ollama_status(base_url, model_name=model_name)
+    return ready
+
+
+def ensure_ollama_ready(
+    *,
+    base_url: str | None = None,
+    compose_dir: str | Path | None = None,
+    startup_timeout_seconds: int | None = None,
+    poll_interval_seconds: float | None = None,
+) -> str:
+    settings = get_settings()
+    effective_base_url = (base_url or settings.ollama_base_url).rstrip("/")
+    effective_model = settings.ollama_model.strip() or None
+    if _ollama_ready(effective_base_url, effective_model):
+        logger.info("ollama_runtime_reused", base_url=effective_base_url, model=effective_model)
+        return "reused"
+
+    project_root = Path(compose_dir) if compose_dir is not None else find_project_root()
+    command = ["docker", "compose", "up", "-d", "ollama"]
+    result = subprocess.run(
+        command,
+        cwd=project_root,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or "docker compose failed"
+        report_error(
+            logger,
+            "ollama_start_failed",
+            "Ollama failed to start",
+            error_type="ollama_start_failed",
+            base_url=effective_base_url,
+            detail=detail,
+        )
+        raise OllamaReadyError(
+            error_type="ollama_start_failed",
+            message=f"Failed to start ollama container: {detail}",
+            retryable=False,
+            context={"base_url": effective_base_url},
+        )
+
+    timeout_seconds = startup_timeout_seconds or settings.ollama_startup_timeout_seconds
+    poll_seconds = poll_interval_seconds or settings.ollama_poll_interval_seconds
+    deadline = time.monotonic() + timeout_seconds
+    last_error_type = "ollama_ready_timeout"
+    while time.monotonic() < deadline:
+        ready, error_type = _ollama_status(effective_base_url, model_name=effective_model)
+        if ready:
+            logger.info("ollama_runtime_ready", base_url=effective_base_url, model=effective_model)
+            return "started"
+        if error_type:
+            last_error_type = error_type
+        time.sleep(poll_seconds)
+
+    report_error(
+        logger,
+        last_error_type,
+        "Ollama did not become ready in time" if last_error_type == "ollama_ready_timeout" else "Ollama is unavailable",
+        error_type=last_error_type,
+        base_url=effective_base_url,
+        model=effective_model,
+        timeout_seconds=timeout_seconds,
+    )
+    raise OllamaReadyError(
+        error_type=last_error_type,
+        message=(
+            f"Ollama container did not become ready within {timeout_seconds} seconds"
+            if last_error_type == "ollama_ready_timeout"
+            else f"Ollama model {effective_model} is unavailable"
+            if last_error_type == "ollama_model_missing"
+            else "Ollama service is unavailable"
+        ),
+        retryable=False,
+        context={"base_url": effective_base_url, "model": effective_model, "timeout_seconds": timeout_seconds},
+    )
+
+
+def create_llm_client(
+    backend: str | None = None,
+    *,
+    model: str | None = None,
+    api_key: str | None = None,
+    base_url: str | None = None,
+) -> LLMClient:
     settings = get_settings()
     llm_backend = backend or settings.llm_backend
     if llm_backend == "ollama":
-        return OllamaClient(base_url=settings.ollama_base_url)
-    if llm_backend == "gemini":
-        return GeminiClient(
-            model=settings.gemini_model,
-            project=settings.gcp_project,
-            location=settings.gcp_location,
-            credentials_path=settings.gcp_credentials_path,
+        return OllamaClient(model=model, base_url=base_url or settings.ollama_base_url)
+    if llm_backend == "api":
+        return APIClient(
+            model=model or settings.api_model,
+            api_key=api_key,
+            base_url=base_url or settings.api_base_url,
         )
-    raise ValueError("llm backend must be one of: gemini, ollama")
+    raise ValueError("llm backend must be one of: api, ollama")

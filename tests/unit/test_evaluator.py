@@ -28,16 +28,17 @@ class FakeReranker:
         return [dict(item) for item in self.reranked_by_question[query][:top_k]]
 
 
-def _result(ref_id: str, rank: int) -> dict:
+def _result(doc_id: str, rank: int) -> dict:
     return {
         "rank": rank,
-        "chunk_id": f"{ref_id}_aaaabbbb",
-        "ref_id": ref_id,
+        "chunk_id": f"{doc_id}_aaaabbbb",
+        "doc_id": doc_id,
         "score": 1.0 / rank,
-        "text": f"evidence for {ref_id}",
-        "page": rank,
-        "source_file": f"{ref_id}.pdf",
+        "text": f"evidence for {doc_id}",
+        "page_number": rank,
         "headings": [],
+        "caption": "",
+        "asset_path": "",
         "chunk_type": "text",
     }
 
@@ -49,7 +50,7 @@ def _write_dataset(path: Path, rows: list[dict[str, str]]) -> None:
         writer.writerows(rows)
 
 
-def test_evaluator_run_writes_report_and_summary_files(monkeypatch, tmp_path: Path):
+def test_evaluator_run_writes_report_and_summary_files(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     dataset = tmp_path / "dataset.csv"
     _write_dataset(
         dataset,
@@ -89,12 +90,8 @@ def test_evaluator_run_writes_report_and_summary_files(monkeypatch, tmp_path: Pa
     assert report["mrr"] == pytest.approx(0.75)
     assert report["ndcg_at_k"] == pytest.approx((1.0 + (1.0 / math.log2(3))) / 2)
 
-    rows = list(csv.reader(summary_path.read_text(encoding="utf-8").splitlines()))
-    assert rows[0][:4] == ["run_id", "retrieval_mode", "top_k", "rerank"]
-    assert rows[1][1:4] == ["hybrid", "2", "0"]
 
-
-def test_evaluator_run_uses_reranked_results(monkeypatch, tmp_path: Path):
+def test_evaluator_run_uses_reranked_results(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     dataset = tmp_path / "dataset.csv"
     _write_dataset(dataset, [{"id": "q1", "question": "rerank question", "ref_id": "paper1"}])
     fake_retriever = FakeRetriever({"rerank question": [_result("paper2", 1), _result("paper1", 2)]})

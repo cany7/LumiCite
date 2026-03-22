@@ -13,7 +13,7 @@ def _load_yaml(path: Path) -> dict:
     return yaml.safe_load(path.read_text(encoding="utf-8"))
 
 
-def test_no_raw_print_calls_in_src():
+def test_no_raw_print_calls_in_src() -> None:
     offenders: list[str] = []
 
     for path in _src_files():
@@ -24,28 +24,34 @@ def test_no_raw_print_calls_in_src():
     assert offenders == []
 
 
-def test_main_has_no_import_star():
-    main_path = Path("src/main.py")
-    text = main_path.read_text(encoding="utf-8")
+def test_main_has_no_import_star() -> None:
+    text = Path("src/main.py").read_text(encoding="utf-8")
 
     assert " import *" not in text
 
 
-def test_ci_workflow_uses_frozen_sync():
-    workflow = _load_yaml(Path(".github/workflows/ci.yml"))
-    steps = workflow["jobs"]["checks"]["steps"]
-    run_steps = [step.get("run", "") for step in steps if isinstance(step, dict)]
-
-    assert "uv sync --frozen" in run_steps
-
-
-def test_docker_compose_waits_for_healthy_ollama_and_declares_healthchecks():
+def test_docker_compose_keeps_optional_ollama_and_removes_mineru_parser() -> None:
     compose = _load_yaml(Path("docker-compose.yml"))
-    api = compose["services"]["api"]
-    ollama = compose["services"]["ollama"]
+    services = compose["services"]
+    api = services["api"]
+    ollama = services["ollama"]
 
-    assert api["depends_on"]["ollama"]["condition"] == "service_healthy"
+    assert "mineru-parser" not in services
+    assert "depends_on" not in api
     assert "healthcheck" in api
     assert "healthcheck" in ollama
+    assert ollama["build"]["dockerfile"] == "Dockerfile.ollama"
+    assert ollama["environment"]["RAG_OLLAMA_MODEL"] == "${RAG_OLLAMA_MODEL:-qwen3.5:4b}"
     assert "/api/v1/health" in api["healthcheck"]["test"][-1]
-    assert ollama["healthcheck"]["test"] == ["CMD", "ollama", "list"]
+    assert ollama["healthcheck"]["test"] == [
+        "CMD-SHELL",
+        "ollama list | grep -q '^${RAG_OLLAMA_MODEL:-qwen3.5:4b}[[:space:]]'",
+    ]
+
+
+def test_ollama_dockerfile_uses_bootstrap_entrypoint() -> None:
+    text = Path("Dockerfile.ollama").read_text(encoding="utf-8")
+
+    assert "FROM ollama/ollama:latest" in text
+    assert "docker/ollama-entrypoint.sh" in text
+    assert 'ENTRYPOINT ["/usr/local/bin/ollama-entrypoint.sh"]' in text

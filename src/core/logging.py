@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import functools
 import logging
+import sys
 import time
 from typing import Any, Callable, TypeVar
 
 import structlog
 
 from src.config.settings import get_settings
+from src.core.paths import rag_log_path
 
 _F = TypeVar("_F", bound=Callable[..., Any])
 _configured = False
@@ -38,13 +40,45 @@ def configure_logging() -> None:
         cache_logger_on_first_use=True,
     )
 
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    log_file = rag_log_path()
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    root_logger.handlers.clear()
+
+    file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(logging.Formatter("%(message)s"))
+
+    root_logger.addHandler(file_handler)
     _configured = True
 
 
 def get_logger(name: str | None = None) -> Any:
     configure_logging()
     return structlog.get_logger(name)
+
+
+def emit_cli_error(message: str) -> None:
+    text = str(message).strip()
+    if not text:
+        return
+    sys.stderr.write(f"{text}\n")
+
+
+def report_error(
+    logger: Any,
+    event: str,
+    cli_message: str,
+    *,
+    level: str = "error",
+    **fields: Any,
+) -> None:
+    configure_logging()
+    log_method = getattr(logger, level, logger.error)
+    log_method(event, **fields)
+    emit_cli_error(cli_message)
 
 
 def timed(name: str | None = None) -> Callable[[_F], _F]:

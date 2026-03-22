@@ -15,35 +15,35 @@ def _unique_in_order(values: list[str]) -> list[str]:
     return output
 
 
-def recall_at_k(retrieved_ref_ids: list[str], relevant_ref_ids: list[str], k: int) -> float:
-    relevant = set(_unique_in_order(relevant_ref_ids))
+def recall_at_k(retrieved_doc_ids: list[str], relevant_doc_ids: list[str], k: int) -> float:
+    relevant = set(_unique_in_order(relevant_doc_ids))
     if k <= 0 or not relevant:
         return 0.0
 
-    retrieved = set(_unique_in_order(retrieved_ref_ids)[:k])
+    retrieved = set(_unique_in_order(retrieved_doc_ids)[:k])
     return len(retrieved & relevant) / len(relevant)
 
 
-def mrr(retrieved_ref_ids: list[str], relevant_ref_ids: list[str]) -> float:
-    relevant = set(_unique_in_order(relevant_ref_ids))
+def mrr(retrieved_doc_ids: list[str], relevant_doc_ids: list[str]) -> float:
+    relevant = set(_unique_in_order(relevant_doc_ids))
     if not relevant:
         return 0.0
 
-    for rank, ref_id in enumerate(_unique_in_order(retrieved_ref_ids), start=1):
-        if ref_id in relevant:
+    for rank, doc_id in enumerate(_unique_in_order(retrieved_doc_ids), start=1):
+        if doc_id in relevant:
             return 1.0 / rank
     return 0.0
 
 
-def ndcg_at_k(retrieved_ref_ids: list[str], relevant_ref_ids: list[str], k: int) -> float:
-    relevant = set(_unique_in_order(relevant_ref_ids))
+def ndcg_at_k(retrieved_doc_ids: list[str], relevant_doc_ids: list[str], k: int) -> float:
+    relevant = set(_unique_in_order(relevant_doc_ids))
     if k <= 0 or not relevant:
         return 0.0
 
-    ranked = _unique_in_order(retrieved_ref_ids)[:k]
+    ranked = _unique_in_order(retrieved_doc_ids)[:k]
     dcg = 0.0
-    for rank, ref_id in enumerate(ranked, start=1):
-        if ref_id in relevant:
+    for rank, doc_id in enumerate(ranked, start=1):
+        if doc_id in relevant:
             dcg += 1.0 / math.log2(rank + 1)
 
     ideal_hits = min(len(relevant), k)

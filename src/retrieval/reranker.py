@@ -7,6 +7,8 @@ from sentence_transformers import CrossEncoder
 
 from src.config.settings import get_settings
 from src.core.logging import get_logger
+from src.core.model_assets import configure_runtime_cache_environment
+from src.core.paths import sentence_transformers_cache_dir
 
 logger = get_logger(__name__)
 
@@ -14,7 +16,8 @@ logger = get_logger(__name__)
 @lru_cache(maxsize=1)
 def _cross_encoder(model_name: str) -> CrossEncoder:
     logger.info("reranker_model_loading", model=model_name)
-    return CrossEncoder(model_name)
+    configure_runtime_cache_environment()
+    return CrossEncoder(model_name, cache_folder=str(sentence_transformers_cache_dir()))
 
 
 class Reranker:

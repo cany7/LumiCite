@@ -5,15 +5,11 @@ services:
       dockerfile: Dockerfile
     command: ["uv", "run", "rag", "serve", "--host", "0.0.0.0", "--port", "8000"]
     environment:
-      RAG_LLM_BACKEND: ollama
       RAG_OLLAMA_BASE_URL: http://ollama:11434
     ports:
       - "8000:8000"
     volumes:
       - ./data:/app/data
-    depends_on:
-      ollama:
-        condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=2).read()"]
       interval: 10s
@@ -22,13 +18,17 @@ services:
       start_period: 10s
 
   ollama:
-    image: ollama/ollama:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.ollama
+    environment:
+      RAG_OLLAMA_MODEL: ${RAG_OLLAMA_MODEL:-qwen3.5:4b}
     ports:
       - "11434:11434"
     volumes:
       - ollama:/root/.ollama
     healthcheck:
-      test: ["CMD", "ollama", "list"]
+      test: ["CMD-SHELL", "ollama list | grep -q '^${RAG_OLLAMA_MODEL:-qwen3.5:4b}[[:space:]]'"]
       interval: 10s
       timeout: 5s
       retries: 12

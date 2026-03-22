@@ -6,6 +6,8 @@ from sentence_transformers import SentenceTransformer
 
 from src.config.settings import get_settings
 from src.core.logging import get_logger, timed
+from src.core.model_assets import configure_runtime_cache_environment
+from src.core.paths import sentence_transformers_cache_dir
 from src.indexing.vector_store import FaissStore
 
 logger = get_logger(__name__)
@@ -13,13 +15,7 @@ logger = get_logger(__name__)
 
 def _doc_id_from_record(record: dict[str, Any]) -> str:
     metadata = record.get("metadata", {}) or {}
-    doc_id = (
-        metadata.get("doc_id")
-        or metadata.get("paper_id")
-        or metadata.get("source_id")
-        or metadata.get("paper")
-        or ""
-    )
+    doc_id = metadata.get("doc_id") or ""
     if doc_id:
         return str(doc_id)
 
@@ -30,7 +26,8 @@ def _doc_id_from_record(record: dict[str, Any]) -> str:
 @lru_cache(maxsize=1)
 def _embedding_model(model_name: str) -> SentenceTransformer:
     logger.info("dense_model_loading", model=model_name)
-    return SentenceTransformer(model_name)
+    configure_runtime_cache_environment()
+    return SentenceTransformer(model_name, cache_folder=str(sentence_transformers_cache_dir()))
 
 
 class DenseRetriever:
@@ -83,14 +80,15 @@ class DenseRetriever:
             results.append(
                 {
                     "rank": len(results) + 1,
+                    "doc_id": _doc_id_from_record(record),
                     "chunk_id": str(record.get("id", "")),
-                    "ref_id": _doc_id_from_record(record),
+                    "chunk_type": str(metadata.get("chunk_type", "text") or "text"),
                     "score": score,
                     "text": str(record.get("text", "")),
-                    "page": metadata.get("page_number") or metadata.get("page"),
-                    "source_file": str(metadata.get("source_file", "")),
+                    "page_number": metadata.get("page_number") or metadata.get("page"),
                     "headings": list(metadata.get("headings", []) or []),
-                    "chunk_type": str(metadata.get("chunk_type", "text")),
+                    "caption": str(metadata.get("caption", "")),
+                    "asset_path": str(metadata.get("asset_path", "")),
                 }
             )
 

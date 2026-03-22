@@ -1,4 +1,4 @@
-"""Prompt builder for structured answers with evidence-span citations."""
+"""Prompt builder for structured answers with chunk-level citations."""
 from __future__ import annotations
 
 from typing import Any
@@ -6,79 +6,81 @@ from typing import Any
 from src.core.constants import FALLBACK_ANSWER
 
 
-def build_prompt(question: str, contexts: list[dict[str, Any]], candidate_ref_ids: list[str]) -> str:
-    """Create the instruction + context block for the model."""
+def build_prompt(
+    question: str,
+    contexts: list[dict[str, Any]],
+    candidate_chunk_ids: list[str] | None = None,
+) -> str:
     instructions = f"""
-Answer using ONLY the context below. If it's not enough, use the fallback.
+Answer using ONLY the context below. If the question cannot be answered directly and confidently from the provided context, return the fallback.
 
-Keep it short and factual. Include:
-- ref_id list from metadata.csv
-- supporting_materials (short quote/table/figure refs from context)
-- explanation (1–2 lines linking the quote to the answer)
-- citations: a JSON array of objects with keys ref_id, page, evidence_text, evidence_type
+Return ONLY valid JSON with keys:
+answer, supporting_materials, explanation, citations
 
-Normalization:
-- Numeric: put the number in answer_value; unit in answer_unit.
-- Ranges: answer_value as [low,high].
-- TRUE/FALSE: answer in caps; answer_value 1/0; unit is_blank.
-- Terms: answer_value = term; unit is_blank.
-- If not answerable from context: answer = "{FALLBACK_ANSWER}", value/unit = is_blank.
-
-Citation rules:
-- Every citation ref_id must come from the candidate reference IDs or visible context headers.
-- evidence_text must be an exact supporting span copied from a context snippet.
-- page must be the page number shown in the snippet header when present, else null.
-- evidence_type must be one of text, table, figure.
-- If multiple snippets support the answer, include multiple citations.
-
-Return ONLY JSON with keys:
-answer, answer_value, answer_unit, ref_id, supporting_materials, explanation, citations
+Rules:
+- First determine whether the provided context is directly relevant to the question.
+- Topical similarity alone is not enough; the cited evidence must directly answer the question.
+- If the context is irrelevant, loosely related, insufficient, or does not directly support an answer, return the fallback.
+- Do not use outside knowledge.
+- Keep the answer short, factual, and grounded in the cited evidence.
+- Use chunk_id values exactly as provided in the context.
+- Do not invent document IDs, page numbers, captions, asset paths, or any other missing details.
+- citations must be a JSON array of objects with keys:
+  - chunk_id
+  - evidence_text
+  - evidence_type
+- evidence_text must be the shortest exact supporting span copied from a single context chunk.
+- evidence_type must be one of: text, table, figure.
+- Include only the most relevant citations needed to support the answer.
+- supporting_materials should be a brief evidence summary grounded only in the cited chunks.
+- explanation should briefly state why the answer is supported by the cited evidence, or why the fallback was used.
+- If fallback is used, set:
+  - answer to "{FALLBACK_ANSWER}"
+  - supporting_materials to ""
+  - citations to []
+  - explanation to "The provided context is irrelevant or insufficient to answer the question."
 
 Question:
 {question}
 
-Candidate reference IDs (from retrieval): {candidate_ref_ids}
+Candidate chunk IDs:
+{candidate_chunk_ids or [context.get("chunk_id") for context in contexts if context.get("chunk_id")]}
 
 Context snippets:
 """
-    ctx_lines: list[str] = []
-    for i, c in enumerate(contexts, start=1):
-        ref_id = c.get("ref_id")
-        page = c.get("page")
-        headings_val: Any = c.get("headings")
-        heading_str = ""
-        if isinstance(headings_val, list):
-            heading_str = "; ".join(str(h) for h in headings_val if h)
-        elif headings_val:
-            heading_str = str(headings_val)
-        chunk_type = str(c.get("chunk_type", "text") or "text")
 
-        header_bits = [f"ref_id={ref_id}", f"type={chunk_type}"]
-        if page is not None:
-            header_bits.append(f"page={page}")
-        if heading_str:
-            header_bits.append(f"heading={heading_str}")
+    snippet_lines: list[str] = []
+    for index, context in enumerate(contexts, start=1):
+        chunk_id = str(context.get("chunk_id", "") or "").strip()
+        doc_id = str(context.get("doc_id", "") or "").strip()
+        chunk_type = str(context.get("chunk_type", "text") or "text").strip()
+        page_number = context.get("page_number")
+        headings = context.get("headings") or []
+        caption = str(context.get("caption", "") or "").strip()
+        text = str(context.get("text", "") or "").strip()
 
-        header = ", ".join(header_bits)
-        text = c.get("text", "").strip()
-        ctx_lines.append(f"[{i}] ({header})\n{text}\n")
+        header_bits = [f"chunk_id={chunk_id}", f"doc_id={doc_id}", f"type={chunk_type}"]
+        if page_number is not None:
+            header_bits.append(f"page={page_number}")
+        if headings:
+            heading_text = " > ".join(str(item).strip() for item in headings if str(item).strip())
+            if heading_text:
+                header_bits.append(f"headings={heading_text}")
+        if caption:
+            header_bits.append(f"caption={caption}")
 
-    ctx_block = "\n".join(ctx_lines)
+        snippet_lines.append(f"[{index}] ({', '.join(header_bits)})\n{text}\n")
 
     closing = """
 ---
 Output JSON shape:
 {
   "answer": "string",
-  "answer_value": "string",
-  "answer_unit": "string",
-  "ref_id": ["paper_id"],
   "supporting_materials": "string",
   "explanation": "string",
   "citations": [
     {
-      "ref_id": "paper_id",
-      "page": 3,
+      "chunk_id": "doc_chunk_id",
       "evidence_text": "exact supporting span",
       "evidence_type": "text"
     }
@@ -87,4 +89,4 @@ Output JSON shape:
 JSON only.
 """
 
-    return instructions + ctx_block + closing
+    return instructions + "\n".join(snippet_lines) + closing

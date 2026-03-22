@@ -11,7 +11,7 @@ import numpy as np
 from rank_bm25 import BM25Okapi
 
 from src.core.logging import get_logger
-from src.core.paths import find_project_root
+from src.core.paths import bm25_index_path, bm25_metadata_path, chunks_jsonl_path, find_project_root
 
 logger = get_logger(__name__)
 
@@ -33,9 +33,9 @@ def _file_sha256(path: Path) -> str:
 class BM25Index:
     def __init__(self, index_path: Path | None = None, chunks_path: Path | None = None) -> None:
         root = find_project_root()
-        self.index_path = index_path or (root / "data" / "bm25_index.pkl")
-        self.chunks_path = chunks_path or (root / "data" / "JSON" / "chunks.jsonl")
-        self.metadata_path = root / "data" / "bm25_index.meta.json"
+        self.index_path = index_path or bm25_index_path(root)
+        self.chunks_path = chunks_path or chunks_jsonl_path(root)
+        self.metadata_path = bm25_metadata_path(root)
         self.bm25: BM25Okapi | None = None
         self.records: list[dict[str, Any]] = []
         self.metadata: dict[str, Any] = {}

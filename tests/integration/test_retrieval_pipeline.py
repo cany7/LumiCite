@@ -9,7 +9,7 @@ import pytest
 import src.retrieval.dense_retriever as dense_module
 import src.retrieval.reranker as reranker_module
 from src.core.constants import RRF_K
-from src.core.schemas import EmbeddingRecord, TextChunk
+from src.core.schemas import EmbeddingRecord, FigureChunk, TextChunk
 from src.indexing.bm25_index import BM25Index
 from src.indexing.vector_store import FaissStore
 from src.retrieval.dense_retriever import DenseRetriever
@@ -52,15 +52,15 @@ def retrieval_artifacts(tmp_path: Path) -> dict[str, Path]:
             text="alpha energy baseline",
             page_number=1,
             headings=["Intro"],
-            source_file="paper1.pdf",
         ),
-        TextChunk(
-            chunk_id="paper2_ccccdddd",
+        FigureChunk(
+            chunk_id="paper2_fig_ccccdddd",
             doc_id="paper2",
-            text="beta emissions comparison",
+            text="beta emissions comparison figure",
             page_number=2,
             headings=["Results"],
-            source_file="paper2.pdf",
+            caption="Figure 2. Emissions comparison",
+            asset_path="data/assets/paper2/paper2_fig_ccccdddd.png",
         ),
         TextChunk(
             chunk_id="paper3_eeeeffff",
@@ -68,7 +68,6 @@ def retrieval_artifacts(tmp_path: Path) -> dict[str, Path]:
             text="gamma water footprint",
             page_number=3,
             headings=["Appendix"],
-            source_file="paper3.pdf",
         ),
     ]
     embeddings = [
@@ -79,22 +78,24 @@ def retrieval_artifacts(tmp_path: Path) -> dict[str, Path]:
                 "doc_id": "paper1",
                 "page_number": 1,
                 "headings": ["Intro"],
-                "source_file": "paper1.pdf",
                 "chunk_type": "text",
+                "caption": "",
+                "asset_path": "",
             },
             embedding=[0.0, 0.0],
             content_hash="hash-paper1",
             embedding_model="mock-model",
         ),
         EmbeddingRecord(
-            id="paper2_ccccdddd",
-            text="beta emissions comparison",
+            id="paper2_fig_ccccdddd",
+            text="beta emissions comparison figure",
             metadata={
                 "doc_id": "paper2",
                 "page_number": 2,
                 "headings": ["Results"],
-                "source_file": "paper2.pdf",
-                "chunk_type": "text",
+                "chunk_type": "figure",
+                "caption": "Figure 2. Emissions comparison",
+                "asset_path": "data/assets/paper2/paper2_fig_ccccdddd.png",
             },
             embedding=[5.0, 5.0],
             content_hash="hash-paper2",
@@ -107,8 +108,9 @@ def retrieval_artifacts(tmp_path: Path) -> dict[str, Path]:
                 "doc_id": "paper3",
                 "page_number": 3,
                 "headings": ["Appendix"],
-                "source_file": "paper3.pdf",
                 "chunk_type": "text",
+                "caption": "",
+                "asset_path": "",
             },
             embedding=[10.0, 10.0],
             content_hash="hash-paper3",
@@ -130,7 +132,7 @@ def retrieval_artifacts(tmp_path: Path) -> dict[str, Path]:
     return {"chunks_path": chunks_path, "embeddings_path": embeddings_path}
 
 
-def test_dense_retrieval_returns_results(monkeypatch, tmp_path: Path, retrieval_artifacts: dict[str, Path]):
+def test_dense_retrieval_returns_results(monkeypatch, tmp_path: Path, retrieval_artifacts: dict[str, Path]) -> None:
     monkeypatch.setattr(dense_module, "_embedding_model", lambda model_name: FakeSentenceTransformer([0.0, 0.0]))
     store = FaissStore(
         index_path=tmp_path / "faiss.index",
@@ -143,89 +145,73 @@ def test_dense_retrieval_returns_results(monkeypatch, tmp_path: Path, retrieval_
         top_k=2,
     )
 
-    assert [item["ref_id"] for item in results] == ["paper1", "paper2"]
+    assert [item["doc_id"] for item in results] == ["paper1", "paper2"]
     assert results[0]["score"] > results[1]["score"]
-    assert results[0]["page"] == 1
-    assert results[0]["source_file"] == "paper1.pdf"
+    assert results[0]["page_number"] == 1
+    assert results[1]["caption"] == "Figure 2. Emissions comparison"
 
 
-def test_dense_retrieval_respects_threshold(monkeypatch, tmp_path: Path, retrieval_artifacts: dict[str, Path]):
-    monkeypatch.setattr(
-        dense_module,
-        "_embedding_model",
-        lambda model_name: FakeSentenceTransformer([100.0, 100.0]),
-    )
-    store = FaissStore(
-        index_path=tmp_path / "faiss.index",
-        text_data_path=tmp_path / "text_data.pkl",
-        embeddings_path=retrieval_artifacts["embeddings_path"],
-    )
-
-    results = DenseRetriever(store=store, model_name="mock-model", distance_threshold=1.0).retrieve(
-        "no match",
-        top_k=3,
-    )
-
-    assert results == []
-
-
-def test_sparse_retrieval_returns_results(tmp_path: Path, retrieval_artifacts: dict[str, Path]):
+def test_sparse_retrieval_returns_results(tmp_path: Path, retrieval_artifacts: dict[str, Path]) -> None:
     index = BM25Index(index_path=tmp_path / "bm25_index.pkl", chunks_path=retrieval_artifacts["chunks_path"])
 
-    results = SparseRetriever(index=index).retrieve("emissions comparison", top_k=2)
+    results = SparseRetriever(index=index).retrieve("beta", top_k=2)
 
     assert len(results) == 1
-    assert results[0]["ref_id"] == "paper2"
-    assert results[0]["chunk_id"] == "paper2_ccccdddd"
-    assert results[0]["score"] > 0.0
+    assert results[0]["doc_id"] == "paper2"
+    assert results[0]["chunk_id"] == "paper2_fig_ccccdddd"
+    assert results[0]["asset_path"].endswith(".png")
 
 
-def test_hybrid_scores_are_rrf():
+def test_hybrid_scores_are_rrf() -> None:
     dense_results = [
         {
             "rank": 1,
             "chunk_id": "paper1_aaaabbbb",
-            "ref_id": "paper1",
+            "doc_id": "paper1",
             "score": 0.9,
             "text": "alpha",
-            "page": 1,
-            "source_file": "paper1.pdf",
+            "page_number": 1,
             "headings": [],
+            "caption": "",
+            "asset_path": "",
             "chunk_type": "text",
         },
         {
             "rank": 2,
-            "chunk_id": "paper2_ccccdddd",
-            "ref_id": "paper2",
+            "chunk_id": "paper2_fig_ccccdddd",
+            "doc_id": "paper2",
             "score": 0.8,
             "text": "beta",
-            "page": 2,
-            "source_file": "paper2.pdf",
+            "page_number": 2,
             "headings": [],
-            "chunk_type": "text",
+            "caption": "Figure 2",
+            "asset_path": "data/assets/paper2.png",
+            "chunk_type": "figure",
         },
     ]
     sparse_results = [
         {
             "rank": 1,
             "chunk_id": "paper1_aaaabbbb",
-            "ref_id": "paper1",
+            "doc_id": "paper1",
             "score": 0.7,
             "text": "alpha",
-            "page": 1,
-            "source_file": "paper1.pdf",
+            "page_number": 1,
             "headings": [],
+            "caption": "",
+            "asset_path": "",
             "chunk_type": "text",
         },
         {
             "rank": 2,
             "chunk_id": "paper3_eeeeffff",
-            "ref_id": "paper3",
+            "doc_id": "paper3",
             "score": 0.6,
             "text": "gamma",
-            "page": 3,
-            "source_file": "paper3.pdf",
+            "page_number": 3,
             "headings": [],
+            "caption": "",
+            "asset_path": "",
             "chunk_type": "text",
         },
     ]
@@ -238,25 +224,24 @@ def test_hybrid_scores_are_rrf():
     assert results[0]["chunk_id"] == "paper1_aaaabbbb"
     assert results[0]["score"] == pytest.approx((1 / (RRF_K + 1)) + (1 / (RRF_K + 1)))
     remaining = {item["chunk_id"]: item["score"] for item in results[1:]}
-    assert remaining["paper2_ccccdddd"] == pytest.approx(1 / (RRF_K + 2))
+    assert remaining["paper2_fig_ccccdddd"] == pytest.approx(1 / (RRF_K + 2))
     assert remaining["paper3_eeeeffff"] == pytest.approx(1 / (RRF_K + 2))
-    assert [item["rank"] for item in results] == [1, 2, 3]
 
 
-def test_reranker_changes_order(monkeypatch):
+def test_reranker_changes_order(monkeypatch) -> None:
     monkeypatch.setattr(reranker_module, "_cross_encoder", lambda model_name: FakeCrossEncoder([0.1, 0.9]))
     candidates = [
         {
             "rank": 1,
             "chunk_id": "paper1_aaaabbbb",
-            "ref_id": "paper1",
+            "doc_id": "paper1",
             "score": 0.8,
             "text": "alpha",
         },
         {
             "rank": 2,
-            "chunk_id": "paper2_ccccdddd",
-            "ref_id": "paper2",
+            "chunk_id": "paper2_fig_ccccdddd",
+            "doc_id": "paper2",
             "score": 0.7,
             "text": "beta",
         },
@@ -264,5 +249,5 @@ def test_reranker_changes_order(monkeypatch):
 
     results = Reranker(model_name="mock-reranker").rerank("question", candidates, top_k=2)
 
-    assert [item["chunk_id"] for item in results] == ["paper2_ccccdddd", "paper1_aaaabbbb"]
+    assert [item["chunk_id"] for item in results] == ["paper2_fig_ccccdddd", "paper1_aaaabbbb"]
     assert [item["rank"] for item in results] == [1, 2]

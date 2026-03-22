@@ -10,7 +10,6 @@ def test_settings_loads_from_env_file(tmp_path):
     env_file = tmp_path / ".env"
     env_file.write_text(
         "RAG_RETRIEVAL_MODE=sparse\n"
-        "RAG_INGEST_WORKERS=7\n"
         "RAG_LOG_FORMAT=json\n",
         encoding="utf-8",
     )
@@ -18,7 +17,6 @@ def test_settings_loads_from_env_file(tmp_path):
     settings = Settings(_env_file=env_file)
 
     assert settings.retrieval_mode == "sparse"
-    assert settings.ingest_workers == 7
     assert settings.log_format == "json"
 
 

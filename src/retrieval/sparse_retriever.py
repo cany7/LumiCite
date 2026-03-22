@@ -15,22 +15,23 @@ class SparseRetriever:
         rows = self.index.search(question, top_k)
         results: list[dict[str, Any]] = []
         for score, record in rows:
-            ref_id = str(record.get("doc_id", ""))
-            if not ref_id:
+            doc_id = str(record.get("doc_id", ""))
+            if not doc_id:
                 chunk_id = str(record.get("chunk_id", ""))
-                ref_id = chunk_id.split("_", 1)[0] if "_" in chunk_id else chunk_id
+                doc_id = chunk_id.split("_", 1)[0] if "_" in chunk_id else chunk_id
 
             results.append(
                 {
                     "rank": len(results) + 1,
+                    "doc_id": doc_id,
                     "chunk_id": str(record.get("chunk_id", "")),
-                    "ref_id": ref_id,
+                    "chunk_type": str(record.get("chunk_type", "text") or "text"),
                     "score": score,
                     "text": str(record.get("text", "")),
-                    "page": record.get("page_number"),
-                    "source_file": str(record.get("source_file", "")),
+                    "page_number": record.get("page_number"),
                     "headings": list(record.get("headings", []) or []),
-                    "chunk_type": str(record.get("chunk_type", "text")),
+                    "caption": str(record.get("caption", "")),
+                    "asset_path": str(record.get("asset_path", "")),
                 }
             )
 
