@@ -49,6 +49,42 @@ Interface Layer
   -> HTTP API
 ```
 
+## 评测结果
+
+### 问答生成质量评测
+
+使用[示例数据](#示例数据)中的评测数据集，在默认参数设置下对系统进行了完整测试，结果见[benchmark_QA_default_query_results.csv](./tests/benchmark_QA_default_query_results.csv)
+
+按“语义一致”口径统计，共得到 33 个正确答案，整体正确率为 82.5%。平均 retrieval latency 为 891 ms，平均 generation latency 为 1756 ms
+
+召回及生成过程中，会受到云端 LLM API 服务状态、测试平台计算性能等因素影响，因此延时结果仅供参考，不同运行环境可能存在较大差异
+
+对于部分在默认参数下回答失败的复杂问题，又进一步调整了 reasoning_effort、rerank 和 top_k，进行了定向补充测试。补充测试后，仅剩少量高难度问题仍无法稳定得到正确答案
+
+当前瓶颈主要集中在几类复杂问题模式上，例如：需要多表格或图像证据拼接、跨文档证据整合及推理、以及复杂计算型推理。这类问题的回答效果不仅受检索结果完整性影响，也较依赖所使用 LLM 生成模型的综合能力，后续若切换到更强的模型，仍有进一步提升空间
+
+同时，当前系统在无法准确回答这类复杂问题时，均正确返回了 fallback 结果，没有出现强行作答的情况。整体来看，系统在学术知识库场景下能够稳定地生成准确、质量较高且具备证据约束的回答，并有效规避了 AI 幻觉问题
+
+### 系统检索与召回性能评测
+
+对比了开启（默认基准）与关闭 Query Explanation 两种模式下的检索性能表现，以评估系统整体检索、召回延迟与性能表现：
+
+| Metric | Query Explanation **ON** (Default) | Query Explanation **OFF** | Change |
+| :--- | :--- | :--- | :--- |
+| **Recall@10** | 0.8780 | 0.8780 | = 0% |
+| **MRR** | 0.8171 | 0.7642 | ▼ 6.5% |
+| **NDCG@10** | 0.8321 | 0.7933 | ▼ 4.7% |
+| **Mean Latency** | 994.64 ms | 65.28 ms | ▼ 93% |
+| **P95 Latency** | 1667.82 ms | 39.07 ms | ▼ 97% |
+
+**分析结论**：
+
+- **排序质量**：在此数据集上，开启 Query Explanation 后 **MRR 提升了 6.5%**。优化后的查询能更精准地命中语义核心，使最相关的证据在候选列表中排位显著靠前（通常直接升至 Top 1-2），为答案生成提供更有效、精准的证据
+- **响应性能**：关闭该功能直接省去了 LLM 的推理开销，将检索延迟降低了 **93%**，实现毫秒级的极速响应
+- **场景建议**：实际应用中可根据需求灵活权衡
+  - 在**复杂学术问答**场景下，建议默认**开启**，利用 LLM 挖掘深层语义和隐式条件，以时间换准确率，确保最佳的回答质量
+  - 在**对延迟极度敏感**（如实时补全）或关键词非常明确的场景下，建议关闭，追求极致的响应速度
+
 ## 环境配置&安装
 
 项目依赖与版本约束请参考 `pyproject.toml`、`uv.lock` 及相关配置文件
@@ -323,13 +359,24 @@ uv run rag benchmark --dataset data/benchmark_QA.csv --tag smoke
 }
 ```
 
-The generated report in this run recorded:
+## 使用建议
 
-- `num_questions: 41`
-- `recall_at_k: 0.8537`
-- `mrr: 0.8049`
-- `ndcg_at_k: 0.8177`
-- `mean_retrieval_latency_ms: 473.535`
+- 当知识库发生新增、替换、删除，或 `papers.csv`、`papers.txt` 内容变更时，需手动执行 `rag parse`，再进行检索或问答
+- 当知识库未变化时，无需重复执行 `rag parse`，可直接使用 `rag search` 或 `rag query`
+- `rag search` 适合用于检查召回结果、观察命中内容和调试检索策略；`rag query` 适合在检索基础上生成最终答案并返回引用信息
+- 生成阶段默认通过外部模型 API 执行；如需使用本地后端，可对 `rag parse` 与 `rag query` 显式切换到 `ollama`
+- 本项目更适用于学术论文中的正文、图像与表格联合问答场景，因为系统会将多种证据类型统一纳入检索、重排与答案生成流程
+
+## 项目测试
+
+当前 `tests/` 目录包含 unit tests 与 integration tests，主要覆盖以下功能测试：
+
+- 检索链路：dense、sparse、hybrid 检索，RRF 融合，以及 reranker 改排逻辑
+- 问答链路：prompt 构造、生成结果归一化、引用补全、答案校验与 fallback 行为
+- 解析与入库链路：文本切块、MinerU 输出映射、图像/表格资产处理、embedding 生成、索引构建与持久化一致性
+- 数据源与增量处理：`local_dir`、`url_csv`、`url_list` 的发现与抓取，manifest 增量处理、失败重试与 stale 文档剪枝
+- 接口与运行契约：CLI 与 FastAPI 的参数默认值、返回结构、健康检查与错误响应格式
+- 工程约束：配置加载、日志与错误类型、Docker / CI 配置约束，以及核心 schema 的字段校验
 
 ## 数据与 Pipeline Schema
 
@@ -348,14 +395,6 @@ The generated report in this run recorded:
   - 图片和表格类 chunk 额外包含 `caption`、`footnotes`、`asset_path` 等定位与补充信息
 - 检索阶段使用统一的 `SearchResult` 组织命中结果，问答阶段使用 `Citation` 表达引用定位，并通过 `RAGAnswer` 返回最终答案与引用信息
   - 整体 schema 设计覆盖了从 chunk 归一化、embedding、索引构建，到检索返回与答案补全的完整数据链路
-
-## 使用建议
-
-- 当知识库发生新增、替换、删除，或 `papers.csv`、`papers.txt` 内容变更时，需手动执行 `rag parse`，再进行检索或问答
-- 当知识库未变化时，无需重复执行 `rag parse`，可直接使用 `rag search` 或 `rag query`
-- `rag search` 适合用于检查召回结果、观察命中内容和调试检索策略；`rag query` 适合在检索基础上生成最终答案并返回引用信息
-- 生成阶段默认通过外部模型 API 执行；如需使用本地后端，可对 `rag parse` 与 `rag query` 显式切换到 `ollama`
-- 本项目更适用于学术论文中的正文、图像与表格联合问答场景，因为系统会将多种证据类型统一纳入检索、重排与答案生成流程
 
 ## 故障排查
 
@@ -388,16 +427,6 @@ The generated report in this run recorded:
 
 所有运行时错误会统一记录到项目根目录下的 `rag.log`
 
-## 项目测试
-
-当前 `tests/` 目录包含 unit tests 与 integration tests，主要覆盖以下功能测试：
-
-- 检索链路：dense、sparse、hybrid 检索，RRF 融合，以及 reranker 改排逻辑
-- 问答链路：prompt 构造、生成结果归一化、引用补全、答案校验与 fallback 行为
-- 解析与入库链路：文本切块、MinerU 输出映射、图像/表格资产处理、embedding 生成、索引构建与持久化一致性
-- 数据源与增量处理：`local_dir`、`url_csv`、`url_list` 的发现与抓取，manifest 增量处理、失败重试与 stale 文档剪枝
-- 接口与运行契约：CLI 与 FastAPI 的参数默认值、返回结构、健康检查与错误响应格式
-- 工程约束：配置加载、日志与错误类型、Docker / CI 配置约束，以及核心 schema 的字段校验
 
 ## 示例数据
 仓库提供了一份示例论文 CSV 列表data/pdfs/sample_ai_impacts.csv，选取了30 篇与 AI 环境影响相关的论文，可作为示例知识库输入使用
@@ -406,18 +435,6 @@ The generated report in this run recorded:
 
 示例数据基于公开发布的数据集适配，仅用于本项目的非商业研究与评测用途，对应数据仍受其原始数据许可证约束
 
-## 评测结果
-使用该评测数据集，在默认参数设置下对系统进行了完整测试，结果见[benchmark_QA_default_query_results.csv](./tests/benchmark_QA_default_query_results.csv)
-
-按“语义一致”口径统计，共得到 33 个正确答案，整体正确率为 82.5%。平均 retrieval latency 为 891 ms，平均 generation latency 为 1756 ms
-
-召回及生成过程中，会受到云端 LLM API 服务状态、测试平台计算性能等因素影响，因此延时结果仅供参考，不同运行环境可能存在较大差异
-
-对于部分在默认参数下回答失败的复杂问题，又进一步调整了 reasoning_effort、rerank 和 top_k，进行了定向补充测试。补充测试后，仅剩少量高难度问题仍无法稳定得到正确答案
-
-当前瓶颈主要集中在几类复杂问题模式上，例如：需要多表格或图像证据拼接、跨文档证据整合及推理、以及复杂计算型推理。这类问题的回答效果不仅受检索结果完整性影响，也较依赖所使用 LLM 生成模型的综合能力，后续若切换到更强的模型，仍有进一步提升空间
-
-同时，当前系统在无法准确回答这类复杂问题时，均正确返回了 fallback 结果，没有出现强行作答的情况。整体来看，系统在学术知识库场景下能够稳定地生成准确、质量较高且具备证据约束的回答，并有效规避了 AI 幻觉问题
 
 ## 下一步方向
 

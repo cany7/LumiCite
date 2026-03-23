@@ -6,17 +6,17 @@
 
 # LumiCite
 
-LumiCite is an end-to-end multimodal RAG system for academic paper PDFs. It parses **main text, figures, and tables** into a unified searchable corpus, then combines **hybrid retrieval, reranking, and citation-aware answer generation** to support accurate evidence retrieval, strong recall, and reliable answer synthesis for academic use cases.
+LumiCite is an end-to-end, multimodal RAG system designed for academic research. It unifies **main text, images, and tables** from academic papers into a searchable corpus, combining **hybrid retrieval, reranking, and citation-aware answering** to provide accurate evidence retrieval, high recall, and reliable answer generation for academic applications.
 
 ## Highlights
 
-- **Multimodal Evidence Modeling:** Parses main text, figures, and tables from papers into unified searchable evidence, addressing the issue where text-only RAG misses information and pure image embeddings fail to capture deep structural details like comparisons and trends.
-- **Hybrid Retrieval Mechanism:** Combines `FAISS` vector index with `BM25` sparse index to support both semantic recall and exact keyword/metric matching, covering complex academic retrieval scenarios.
-- **Query Explanation Enhanced Retrieval:** Applies query explanation/expansion before retrieval to handle implicit conditions, unit conversions, and missing baselines, improving recall for complex academic questions.
-- **Dual-Path Retrieval and Reranking Optimization:** Uses dual-path retrieval with `RRF` fusion, followed by cross-encoder reranking to improve precision and reduce noise from semantically similar or dense text.
-- **Multi-Interface Support:** Provides both CLI and HTTP API interfaces to support local usage and service-oriented deployment strategies.
-- **Switchable LLM Backend:** Supports standard LLM APIs and can switch to a containerized `ollama` local backend, suitable for restricted environments like offline or internal networks.
-- **Multiple Input Source Support:** Supports three input sources: `local_dir`, `url_csv`, and `url_list`, covering local PDF ingestion and batch URL import.
+- **Multimodal Evidence Modeling:** Converts main text, images, and tables into unified searchable evidence, addressing information loss in text-only RAG and the inability of pure image embeddings to capture deep structural details like comparisons, trends, and relationships.
+- **Hybrid Retrieval Mechanism:** Combines `FAISS` vector indexing with `BM25` sparse indexing to balance semantic recall with keyword matching, covering both semantic search and exact matching for key terms or metrics in academic scenarios.
+- **Query Explanation Enhanced Retrieval:** Performs query explanation and expansion before retrieval to handle implicit conditions, key value conversions, and missing baselines, improving recall for complex academic questions.
+- **Dual-Path Retrieval and Reranking Optimization:** Uses dual-path retrieval and `RRF` fusion, followed by cross-encoder reranking to improve precision and reduce noise caused by semantically similar or dense text features.
+- **Multi-Interface Support:** Provides both CLI and HTTP API interfaces to adapt to different application scenarios, supporting local usage and cloud-based service deployment.
+- **Switchable LLM Backend:** Supports standard LLM APIs and can switch to a containerized `ollama` local backend to adapt to restricted deployment environments such as offline or internal networks.
+- **Multi-Input Source Support:** Supports three input sources: `local_dir`, `url_csv`, and `url_list`, adapting to different scenarios for local PDF ingestion and batch URL import.
 
 ## System Architecture Overview
 
@@ -49,9 +49,45 @@ Interface Layer
   -> HTTP API
 ```
 
-## Requirements and Installation
+## Evaluation Results
 
-For dependencies and version constraints, see `pyproject.toml`, `uv.lock`, and the related configuration files.
+### QA Generation Quality Evaluation
+
+The system was evaluated using the [Example Data](#example-data) benchmark dataset under default parameter settings. The results can be found in [benchmark_QA_default_query_results.csv](./tests/benchmark_QA_default_query_results.csv).
+
+Based on a "semantic equivalence" criterion, the system achieved 33 correct answers, resulting in an overall accuracy of 82.5%. The average retrieval latency was 891 ms, and the average generation latency was 1756 ms.
+
+Retrieval and generation latencies are subject to factors such as cloud LLM API service status and the computing performance of the test platform, so these results are for reference only and may vary across different environments.
+
+For some complex questions that failed under default parameters, targeted supplementary tests were conducted by adjusting reasoning_effort, rerank, and top_k. After these supplementary tests, only a small number of highly difficult questions remained reliably unanswered.
+
+Current bottlenecks are mainly concentrated on a few complex question patterns, such as those requiring multi-table or image evidence synthesis, cross-document evidence integration and reasoning, and complex computational inference. Answering these questions depends not only on the completeness of retrieval results but also heavily on the comprehensive capabilities of the LLM used for generation. Switching to a stronger model in the future could provide further improvements.
+
+At the same time, when the system could not accurately answer these complex questions, it correctly returned fallback results without forcing an answer. Overall, the system is able to stably generate accurate, high-quality, and evidence-constrained answers in academic knowledge base scenarios, effectively avoiding AI hallucinations.
+
+### System Retrieval & Recall Performance Evaluation
+
+We compared retrieval performance with Query Explanation enabled (default baseline) versus disabled to evaluate the system's overall retrieval, recall latency, and performance:
+
+| Metric | Query Explanation **ON** (Default) | Query Explanation **OFF** | Change |
+| :--- | :--- | :--- | :--- |
+| **Recall@10** | 0.8780 | 0.8780 | = 0% |
+| **MRR** | 0.8171 | 0.7642 | ▼ 6.5% |
+| **NDCG@10** | 0.8321 | 0.7933 | ▼ 4.7% |
+| **Mean Latency** | 994.64 ms | 65.28 ms | ▼ 93% |
+| **P95 Latency** | 1667.82 ms | 39.07 ms | ▼ 97% |
+
+**Analysis Conclusion**:
+
+- **Ranking Quality**: On this dataset, enabling Query Explanation improved **MRR by 6.5%**. The optimized queries more accurately hit the semantic core, pushing the most relevant evidence significantly higher in the candidate list (usually directly to Top 1-2), providing more effective and precise evidence for answer generation.
+- **Response Performance**: Disabling this function eliminates the LLM inference overhead, reducing retrieval latency by **93%** and achieving millisecond-level distinct response times.
+- **Scenario Suggestions**: In practice, tradeoffs can be made flexibly based on requirements:
+  - In **complex academic QA** scenarios, it is recommended to default to **enabled** to utilize the LLM to mine deep semantics and implicit conditions, trading time for accuracy to ensure the best answer quality.
+  - In **latency-sensitive** (e.g., real-time completion) or highly specific keyword scenarios, it is recommended to disable it to pursue ultimate response speed.
+
+## Environment Configuration & Installation
+
+For project dependencies and version constraints, please refer to `pyproject.toml`, `uv.lock`, and related configuration files.
 
 Install dependencies:
 
@@ -60,7 +96,7 @@ uv sync
 cp .env.example .env
 ```
 
-It is recommended to configure `.env` in the project root based on `.env.example`. Common environment variables include:
+It is recommended to refer to `.env.example` to configure `.env` in the project root directory. Common environment variables are as follows:
 
 ```env
 RAG_API_BASE_URL=
@@ -72,35 +108,32 @@ RAG_VISUAL_API_KEY=
 RAG_VISUAL_API_MODEL=
 ```
 
-Configuration notes:
+Configuration description:
 
-- `RAG_API_*` can be used as the general model API configuration for both the visual summary step during ingestion and answer generation in the generation stage.
-- `RAG_VISUAL_API_*` can be used to configure a separate model API specifically for image understanding.
-- `RAG_OLLAMA_MODEL` specifies the model name for the local containerized `ollama` backend. The default is `qwen3.5:4b`.
-- The default model for the generation stage is `qwen/qwen3.5-27b`, which can be changed via `RAG_API_MODEL` or `rag query --model`.
-- The default model for the ingestion stage is `qwen/qwen2.5-vl-7b-instruct`, which can be changed via `RAG_VISUAL_API_MODEL`.
-- When `ollama` is started with `docker compose`, it automatically pulls the model specified by `RAG_OLLAMA_MODEL`. When the CLI switches to `--llm ollama`, it waits until the model is ready before sending requests.
-- The PDF parsing module is invoked directly by `rag parse`. The default compute device is `cpu`, and it can be changed with `rag parse --device`.
+- `RAG_API_*` uses OpenAI SDK common API specifications and is used for both ingest and generation stages.
+- `RAG_VISUAL_API_*` can specify model API configuration separately for the ingest stage.
+- `RAG_OLLAMA_MODEL` specifies the model name for the local containerized `ollama` backend, defaulting to `qwen3.5:4b`.
+- The default model for the generation stage is `qwen/qwen3.5-27b`, which can be adjusted via `RAG_API_MODEL` or `rag query --model`.
+- The default model for the ingest stage is `qwen/qwen2.5-vl-7b-instruct`, which can be adjusted via `RAG_VISUAL_API_MODEL`.
+- When `docker compose` starts the `ollama` service, it will automatically pull the model specified by `RAG_OLLAMA_MODEL`; the CLI will wait for the model to be ready before making requests when switching to `--llm ollama`.
+- The PDF parsing module is directly called by the `rag parse` command, with the default computing device being `cpu`, which can be adjusted via `rag parse --device`.
 
 ## Quick Start
 
-For the first run, it is recommended to initialize the system in the following order:
+For the first run, it is recommended to initialize in the following order:
 
-1. Put PDF files into `data/pdfs/`
-2. Run `rag parse` to download the required models, perform ingestion, generate embeddings, and build indexes
-3. Use `rag search` or `rag query` for retrieval and QA
+1. Place PDF files into `data/pdfs/`
+2. Execute `rag parse` to complete model download, ingestion, embedding, and index construction
+3. Use `rag search` or `rag query` for retrieval and Q&A
 
-## CLI Usage
+## CLI Usage Instructions
 
 ### `rag parse`
 
-`rag parse` synchronizes the paper knowledge base from the current input source, then completes parsing, chunk normalization, embedding generation, and index updates. It is intended for the initial knowledge base build, or for resynchronization after documents are added, replaced, or removed.
-
-On the first run, `rag parse` automatically checks for the required core dependencies, downloads them when needed, and caches them in `data/model_cache/`.
-
-Documents are processed sequentially. PDF parsing and chunk normalization are completed first, and once all documents have been processed, the system writes `chunks.jsonl`, generates embeddings, and updates the indexes in a single batch.
-
-If the process is interrupted unexpectedly, the current run may be incomplete. In that case, rerunning `rag parse` is recommended.
+`rag parse` is used to synchronize the paper knowledge base based on the current input source, completing parsing, chunk normalization, embedding writing, and index updates; this command applies to the initial construction of the knowledge base or re-synchronization after documents are added, replaced, or deleted.
+On the first run, `rag parse` automatically checks and downloads the required core dependency modules and caches them to `data/model_cache/`.
+Document parsing processes documents sequentially, completing PDF parsing and chunk normalization first, and then uniformly writing to `chunks.jsonl`, generating embeddings, and updating the index after all documents are processed.
+If interrupted unexpectedly, the results of the current round may be incomplete, and it is recommended to re-execute `rag parse`.
 
 Default options:
 
@@ -108,22 +141,22 @@ Default options:
 - `--device cpu`
 - `--llm api`
 
-Common arguments:
+Common parameters:
 
 - `--source`
   - Options: `local_dir`, `url_csv`, `url_list`
 - `--path`
-  - Local input path such as `data/pdfs/`, `data/pdfs/papers.csv`, or `data/pdfs/papers.txt`
+  - Fill in the local input path, such as `data/pdfs/`, `data/pdfs/papers.csv`, `data/pdfs/papers.txt`
 - `--device`
-  - Parsing device, such as `cpu`, `cuda`, `cuda:0`, `mps`, or `npu`
+  - Options: `cpu`, `cuda`, `cuda:0`, `mps`, `npu` as the parsing computing device
 - `--llm`
-  - Options: `api`, `ollama`; controls the backend used for figure visual summaries
+  - Options: `api`, `ollama`, used to control the backend used for figure visual summary
 - `--rebuild-index`
-  - Force rebuild of the `FAISS` and `BM25` indexes
+  - Force rebuild of `FAISS` and `BM25` indexes
 - `--retry-failed`
-  - Retry only documents that failed in previous runs
+  - Retry only previously failed documents
 - `--dry-run`
-  - Print the execution plan without actually running it
+  - Only output the plan, do not actually execute
 
 Example:
 
@@ -131,7 +164,7 @@ Example:
 uv run rag parse --source local_dir --path data/pdfs/
 ```
 
-Example result:
+Result example:
 
 ```json
 {
@@ -152,7 +185,7 @@ Example result:
 
 ### `rag search`
 
-`rag search` performs retrieval only and does not call a generation model. It is useful for inspecting recall results, evaluating retrieval quality, or comparing different retrieval strategies. By default, it uses `hybrid` retrieval and returns results in JSON format.
+`rag search` performs only retrieval without calling the generation model, suitable for viewing recall results, checking retrieval quality, or comparing hit situations under different retrieval strategies; it uses `hybrid` retrieval by default and outputs JSON results.
 
 Default options:
 
@@ -162,34 +195,34 @@ Default options:
 - `--query-explanation`
 - `--output-format json`
 
-Common arguments:
+Common parameters:
 
 - `--top-k`
-  - A positive integer specifying how many top results to return; if omitted, the CLI uses `RAG_RETRIEVAL_TOP_K` (default `10`)
+  - Fill in a positive integer indicating the selection of the top k recall results; if not passed, the CLI reads `RAG_RETRIEVAL_TOP_K`, default `10`
 - `--retrieval-mode`
-  - Options: `dense`, `sparse`, `hybrid`
+  - Options: `dense`, `sparse`, `hybrid` retrieval modes
 - `--rerank` / `--no-rerank`
-  - Whether to enable reranking; enabling it improves result quality but reduces speed. When enabled, retrieval fetches `top_k * 5` candidates first, reranks them, and keeps the final `top_k`
+  - Control whether to enable rerank; if enabled, `top_k * 5` candidates are taken for re-ranking first, and then the final `top_k` are retained, which provides better results but is slower
 - `--query-explanation` / `--no-query-explanation`
-  - Optionally rewrite the original question into a retrieval-oriented expanded query before retrieval; the expanded query is used only to improve recall and is fused with the original query's candidates before reranking
-  - Query explanation reasoning does not use `--reasoning-effort`, but is controlled only by `RAG_QUERY_EXPLANATION_REASONING_EFFORT` in `.env` (default `none`)
+  - Optionally enable query explanation enhanced retrieval, suitable for complex questions, enabled by default
+  - Query explanation reasoning does not use `--reasoning-effort` and is only controlled by `RAG_QUERY_EXPLANATION_REASONING_EFFORT` in `.env`, default `none`
 - `--output-format`
   - Options: `json`, `table`
 
 Example:
 
 ```bash
-uv run rag search "energy consumption of PaLM 540B" --top-k 10
+uv run rag search "energy consumption of PaLM 540B"
 ```
 
-Example result:
+Result example:
 
 - The command returned a JSON payload with `total_results: 10`, `retrieval_mode: "hybrid"`, and `retrieval_latency_ms: 3263.582`.
 - The top hits mixed text and figure chunks, including passages about real-world AI service energy consumption and figures mentioning PaLM (540B), GPT-3, Gemini, and hardware or energy cost trends.
 
 ### `rag query`
 
-`rag query` generates the final answer from retrieval results and returns a citation-grounded response. It is intended for paper QA, evidence localization, and result export. By default, it uses `hybrid` retrieval with query explanation enabled and reranking disabled, the final citations are built only from the retrieved chunks selected by the generation step, and the CLI prints a human-readable answer.
+`rag query` generates the final answer based on the retrieval results and returns a response with citation information, suitable for paper Q&A, evidence positioning, and result export; it defaults to `hybrid` fusion retrieval, enables query explanation, and disables rerank; final citations will only come from retrieval chunks actually selected in the generation stage, and the CLI outputs human-readable format by default.
 
 Default options:
 
@@ -200,31 +233,31 @@ Default options:
 - `--llm api`
 - `--reasoning-effort none`
 
-Common arguments:
+Common parameters:
 
 - `--top-k`
-  - A positive integer specifying how many retrieved results are provided as candidates for answer generation; if omitted, the CLI uses `RAG_RETRIEVAL_TOP_K` (default `10`)
+  - Fill in a positive integer indicating the number of retrieval candidates provided for the generation stage; if not passed, the CLI reads `RAG_RETRIEVAL_TOP_K`, default `10`
 - `--retrieval-mode`
   - Options: `dense`, `sparse`, `hybrid`
 - `--rerank` / `--no-rerank`
-  - Whether to enable reranking. When enabled, retrieval fetches `top_k * 5` candidates first, reranks them, and keeps the final `top_k` that are sent to generation
+  - Control whether to enable rerank; if enabled, `top_k * 5` candidates are taken for re-ranking first, and then the final `top_k` results are sent to generation
 - `--query-explanation` / `--no-query-explanation`
-  - Optionally rewrite the original question into a retrieval-oriented expanded query before retrieval; the expanded query is used only to improve recall and is fused with the original query's candidates before reranking
+  - Optionally enable query explanation enhanced retrieval, suitable for complex questions, enabled by default
 - `--llm`
   - Options: `api`, `ollama`
 - `--model`
-  - Model name; only effective when `--llm api` is used
+  - Fill in the model name, only effective when `--llm api`
 - `--reasoning-effort`
-  - Options: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`; only effective when `--llm api` is used, and defaults to `none`
-  - This parameter only affects final answer generation, not query explanation
+  - Options: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, only effective when `--llm api`, default `none`
+  - This parameter only affects final answer generation and does not affect query explanation
 - `--output`
-  - Output file path such as `answer.txt` or `answer.json`
+  - Fill in the output file path, such as `answer.txt` or `answer.json`
 - `--output-format`
-  - Options: `text`, `json`; defaults to `text`
+  - Options: `text`, `json`, default `text`
 - `--json`
-  - Shortcut for `--output-format json`, returns unprocessed JSON structured text for testing purposes
+  - Optional `--output-format json`, returning unprocessed JSON structured text for testing usage
 - `ollama` model
-  - By default, the system automatically deploys and pulls the containerized `qwen3.5:4b` model. You can switch to a different model via `RAG_OLLAMA_MODEL`
+  - Defaults to using `qwen3.5:4b` to automatically deploy and pull the containerized Ollama model; different models can be switched via `RAG_OLLAMA_MODEL`
 
 Example:
 
@@ -232,7 +265,7 @@ Example:
 uv run rag query "What were the CO2 emissions from training GPT-3?"
 ```
 
-Example result:
+Result example:
 
 ```text
 Question
@@ -248,23 +281,23 @@ Evidence
 
 ### `rag serve`
 
-`rag serve` starts the project's HTTP API. It is suitable for local debugging, API integration, and service deployment. By default, it listens on `0.0.0.0:8000`.
+`rag serve` is used to start the project HTTP API, suitable for local debugging, interface integration, or service operation; default listens on `0.0.0.0:8000`.
 
-The HTTP API's `POST /api/v1/search` and `POST /api/v1/query` requests also accept `query_explanation: true` to enable the same retrieval-oriented query expansion used by the CLI.
+The HTTP API's `POST /api/v1/search` and `POST /api/v1/query` requests also support `query_explanation: true` to enable retrieval-oriented query expansion consistent with the CLI.
 
 Default options:
 
 - `--host 0.0.0.0`
 - `--port 8000`
 
-Common arguments:
+Common parameters:
 
 - `--host`
-  - Host address such as `0.0.0.0` or `127.0.0.1`
+  - Fill in listening address, such as `0.0.0.0` or `127.0.0.1`
 - `--port`
-  - Port number such as `8000`
+  - Fill in port number, such as `8000`
 - `--reload`
-  - Enable hot reload for development
+  - Enable development hot reload
 
 Example:
 
@@ -274,9 +307,8 @@ uv run rag serve --host 0.0.0.0 --port 8000
 
 ### `rag benchmark`
 
-`rag benchmark` runs the project evaluation pipeline. At the current stage, it primarily evaluates retrieval quality and retrieval performance by comparing recall and ranking behavior across different retrieval modes, top-k settings, and rerank configurations, while also reporting retrieval latency.
-
-Evaluation results are recorded at the question level, including core metrics such as `recall_at_k`, `mrr`, `ndcg_at_k`, `mean_retrieval_latency_ms`, and `p95_retrieval_latency_ms`. By default, benchmarking runs with `hybrid` retrieval, query explanation enabled, and reranking disabled.
+`rag benchmark` is used to run the project evaluation pipeline, currently mainly evaluating retrieval layer effects and retrieval performance, comparing recall and ranking performance under different retrieval modes, top-k, and rerank configurations, and calculating retrieval latency.
+Evaluation results record core metrics at the question granularity, including `recall_at_k`, `mrr`, `ndcg_at_k`, `mean_retrieval_latency_ms`, and `p95_retrieval_latency_ms`; defaults to executing evaluation based on `hybrid` retrieval, enabling query explanation, and disabling rerank.
 
 Default options:
 
@@ -288,28 +320,29 @@ Default options:
 - `--output-dir data/benchmark_results/`
 - `--tag run`
 
-Common arguments:
+Common parameters:
 
 - `--dataset`
-  - Evaluation dataset path such as `data/benchmark.csv`
+  - Fill in evaluation dataset path, such as `data/benchmark.csv`
 - `--retrieval-mode`
   - Options: `dense`, `sparse`, `hybrid`
 - `--top-k`
-  - A positive integer specifying how many results are retrieved during evaluation; if omitted, the CLI uses `RAG_RETRIEVAL_TOP_K` (default `10`)
+  - Fill in a positive integer indicating the number of retrievals during evaluation; if not passed, the CLI reads `RAG_RETRIEVAL_TOP_K`, default `10`
 - `--rerank` / `--no-rerank`
-  - Whether to enable reranking. When enabled, retrieval fetches `top_k * 5` candidates first, reranks them, and keeps the final `top_k`
+  - Control whether to enable rerank; if enabled, `top_k * 5` candidates are taken for re-ranking first, and then the final `top_k` are retained
 - `--query-explanation` / `--no-query-explanation`
-  - Optionally rewrite each benchmark question into a retrieval-oriented expanded query before retrieval; the expanded query is used only to improve recall and is fused with the original query's candidates before reranking
+  - Optionally rewrite the original question into a retrieval-oriented expanded query before each benchmark question retrieval; the expanded query is only used to enhance retrieval and is merged with the original query's candidate set before rerank, and does not participate in answer generation
+  - Query explanation reasoning does not use command line parameters and is only controlled by `RAG_QUERY_EXPLANATION_REASONING_EFFORT` in `.env`, default `none`
 - `--output-dir`
-  - Output directory such as `data/benchmark_results/`
+  - Fill in result output directory, such as `data/benchmark_results/`
 - `--tag`
-  - Run identifier such as `smoke`
+  - Fill in the identifier name for this run, such as `smoke`
 
-Required fields in the benchmark dataset:
+Test dataset required fields:
 
-- `question_id`: unique question identifier
-- `question`: evaluation question text
-- `ref_doc_id`: the `doc_id` of the reference document for the ground-truth answer
+- `question_id`: Unique question identifier
+- `question`: Evaluation question text
+- `ref_doc_id`: Document `doc_id` corresponding to the standard answer
 
 Example:
 
@@ -317,7 +350,7 @@ Example:
 uv run rag benchmark --dataset data/benchmark_QA.csv --tag smoke
 ```
 
-Example result:
+Result example:
 
 ```json
 {
@@ -326,39 +359,42 @@ Example result:
 }
 ```
 
-The generated report in this run recorded:
+## Usage Suggestions
 
-- `num_questions: 41`
-- `recall_at_k: 0.8537`
-- `mrr: 0.8049`
-- `ndcg_at_k: 0.8177`
-- `mean_retrieval_latency_ms: 473.535`
+- If you make changes to the knowledge base (additions, replacements, deletions, or modifications to `papers.csv` or `papers.txt`), you must manually execute `rag parse` before performing retrieval or Q&A.
+- If the knowledge base has not changed, there is no need to repeat `rag parse`; you can proceed directly to `rag search` or `rag query`.
+- `rag search` is suitable for checking recall results, inspecting hits, and debugging retrieval strategies; `rag query` is intended for generating final answers based on retrieval results and providing citation information.
+- By default, the generation stage uses an external model API. To use a local backend, you must explicitly switch to `ollama` for both `rag parse` and `rag query`.
+- This project is optimized for academic Q&A scenarios that require combining main text, images, and tables, as the system unifies these evidence types throughout the retrieval, reranking, and answer generation process.
+
+## Project Testing
+
+Currently, the `tests/` directory contains unit and integration tests, primarily covering the following functional areas:
+
+- **Retrieval Pipeline:** Dense, sparse, and hybrid retrieval, RRF fusion, and reranker logic.
+- **Q&A Pipeline:** Prompt construction, generation normalization, citation completion, answer validation, and fallback behavior.
+- **Parsing and Ingestion Pipeline:** Text chunking, MinerU output mapping, image/table asset processing, embedding generation, index construction, and persistence consistency.
+- **Data Source and Incremental Processing:** Discovery and crawling for `local_dir`, `url_csv`, and `url_list`; manifest-based incremental processing, retry logic, and stale document pruning.
+- **Interface and Runtime Contracts:** CLI and FastAPI parameter defaults, response structures, health checks, and error response formats.
+- **Engineering Constraints:** Configuration loading, logging and error types, Docker/CI configuration constraints, and field validation for core schemas.
 
 ## Data and Pipeline Schema
 
-The project generates the following directories and artifacts during runtime:
+The project generates a fixed set of key directories and intermediate results during operation:
 
-- `data/pdfs/`: location for source PDF files and default URL input files
-  - `papers.csv`: URL CSV input file; required field: `url`
-  - `papers.txt`: TXT URL list input file, one URL per line
-- `data/intermediate/mineru/`: raw intermediate outputs generated during parsing
-- `data/assets/`: canonical asset directory for figures and tables
-- `data/metadata/`: canonical chunks, embeddings, and retrieval indexes
-- `rag.log`: Unified error log located in the project root.
+- `data/pdfs/`: Location for original PDF documents and default URL input files.
+  - `papers.csv`: URL CSV input file (required field: `url`).
+  - `papers.txt`: TXT URL list input file (one URL per line).
+- `data/intermediate/mineru/`: Raw intermediate outputs from the parsing stage.
+- `data/assets/`: Canonical asset directory for images and tables.
+- `data/metadata/`: Canonical directory for chunks, embeddings, and retrieval indexes.
+- `rag.log`: Unified error log located in the project root directory.
 
-- The project maintains a unified chunk schema across ingestion, retrieval, and answering.
-  - Every chunk includes `chunk_id`, `doc_id`, `text`, `chunk_type`, `page_number`, and `headings` as base fields
-  - Figure and table chunks include additional fields, such as `caption`, `footnotes`, and `asset_path`, for context and localization.
-- Retrieval uses a unified `SearchResult` schema, while the Q&A stage uses `Citation` for references and returns final outputs via `RAGAnswer`.
-  - This schema design covers the entire data path—from chunk normalization and embedding generation to retrieval and final answer synthesis.
-
-## Usage Notes
-
-- If the knowledge base changes (additions, replacements, removals, or modifications to `papers.csv`/`papers.txt`), rerun `rag parse` before retrieval or Q&A.
-- If the knowledge base is unchanged, you can proceed directly to `rag search` or `rag query`.
-- `rag search` is useful for inspecting recall and debugging retrieval strategies, while `rag query` produces final answers with citations.
-- The generation stage defaults to an external model API. For local processing, switch both `rag parse` and `rag query` to `ollama`.
-- This project is optimized for Q&A over academic papers where main text, figures, and tables are interconnected, unifying all evidence types into a seamless retrieval, reranking, and generation workflow.
+- The project uses a unified chunk schema to connect the ingestion, retrieval, and answering stages.
+  - Each chunk contains basic fields: `chunk_id`, `doc_id`, `text`, `chunk_type`, `page_number`, and `headings`.
+  - Image and table chunks include additional positioning and supplementary information, such as `caption`, `footnotes`, and `asset_path`.
+- The retrieval stage uses a unified `SearchResult` schema to organize hits, while the Q&A stage uses `Citation` to denote references and returns the final answer with citations via `RAGAnswer`.
+  - This overall schema design covers the complete data flow from chunk normalization, embedding, and index construction to retrieval and answer synthesis.
 
 ## Troubleshooting
 
@@ -366,10 +402,10 @@ The project generates the following directories and artifacts during runtime:
 
 Check the following:
 
-- Ensure the local parsing runtime is installed and callable.
-- Verify the input path.
-- Whether the visual model API configuration is available
-- Whether the input directory or URL file content matches the expected format
+- Is the local parsing runtime correctly installed and callable in the current environment?
+- Is the input path correct?
+- Is the visual model API configuration available?
+- Does the content in the input directory or URL file match the expected format?
 
 ### `rag query --llm api` failed
 
@@ -378,76 +414,51 @@ Check the following:
 - `RAG_API_BASE_URL`
 - `RAG_API_KEY`
 - `RAG_API_MODEL`
-- Whether the current model API is accessible through the OpenAI SDK
+- Is the current model API accessible via the OpenAI SDK?
 
 ### `rag query --llm ollama` failed
 
 Check the following:
 
-- Whether Docker is running properly
-- Whether the local `ollama` container can be started automatically
-- Whether the model specified by `RAG_OLLAMA_MODEL` has already been pulled or can be pulled successfully
-- Whether the current environment allows the local model backend to initialize correctly
+- Is Docker running normally?
+- Can the local `ollama` container be started automatically?
+- Has the model specified by `RAG_OLLAMA_MODEL` been pulled, or can it be pulled successfully?
+- Does the current environment allow the local model backend to initialize correctly?
 
-All runtime errors are logged to `rag.log` in the project root.
-
-## Tests
-
-The `tests/` directory contains unit and integration tests covering:
-
-- **Retrieval pipeline:** Dense, sparse, and hybrid retrieval, RRF fusion, and reranker behavior
-- **QA pipeline:** Prompt construction, generation output normalization, citation completion, answer validation, and fallback behavior
-- **Parsing and ingestion:** Text chunking, MinerU output mapping, figure/table asset handling, embedding generation, index construction, and persistence consistency
-- **Data sources:** Discovery and ingestion for `local_dir`, `url_csv`, and `url_list`, manifest-based incremental processing, failed-document retry, and stale document pruning
-- **Interface and schema:** Default CLI and FastAPI parameters, response structures, health checks, and field validation
-- **Engineering constraints:** Configuration loading, logging, Docker/CI configuration, and error handling
+All runtime errors are uniformly logged to `rag.log` in the project root directory.
 
 ## Example Data
+The repository provides a sample paper CSV list at `data/pdfs/sample_ai_impacts.csv`, containing 30 papers related to the environmental impact of AI, which can be used as a sample knowledge base.
 
-A sample paper CSV list is provided at `data/pdfs/sample_ai_impacts.csv`, containing 30 papers on AI environmental impact. It can be used as a sample knowledge base input for the system.
+A benchmark dataset `data/benchmark_QA.csv`, constructed from these sample papers, is also provided. It is used to assess recall, ranking, and retrieval latency in the benchmark pipeline and contains 40 test questions.
 
-The benchmark dataset `data/benchmark_QA.csv` is constructed from the sample papers above and is used to evaluate retrieval recall, ranking quality, and retrieval latency in the benchmark pipeline. It contains a total of 40 test questions.
-
-The sample data is adapted from publicly released datasets and is provided only for non-commercial research and evaluation use in this project. The underlying papers and benchmark data remain subject to their original licenses.
-
-## Evaluation Results
-
-The system was evaluated on this benchmark dataset under the default parameter settings. The full results are available in [`benchmark_QA_default_query_results.csv`](./tests/benchmark_QA_default_query_results.csv).
-
-Using a **semantic equivalence** criterion, the system produced **33 correct answers out of 40**, corresponding to an overall accuracy of **82.5%**. The average **retrieval latency** was **891 ms**, and the average **generation latency** was **1756 ms**.
-
-Latency measurements should be treated as reference values only, since both retrieval and generation can be affected by factors such as cloud LLM API service conditions and the compute performance of the test environment. Results may vary noticeably across different runtime settings.
-
-For a subset of harder questions that could not be answered correctly under the default settings, we additionally conducted targeted follow-up tests by adjusting `reasoning_effort`, `rerank`, and `top_k`. After these supplementary tests, only a small number of high-difficulty questions still could not be answered reliably.
-
-The main remaining bottlenecks are concentrated in several difficult query patterns, such as questions requiring multi-table or image evidence composition, cross-document evidence integration and reasoning, or more complex calculation-heavy inference. Performance on these cases depends not only on retrieval completeness, but also on the overall capability of the selected LLM. Further improvement is therefore likely possible with a stronger generation model.
-
-At the same time, when the system could not answer these difficult questions reliably, it consistently returned fallback responses rather than forcing unsupported answers. Overall, the system is able to generate accurate, high-quality, evidence-grounded answers in academic knowledge base settings, while effectively avoiding hallucinated responses.
+The sample data is adapted from publicly available datasets and is intended solely for non-commercial research and evaluation purposes within this project. The underlying data remains subject to its original license.
 
 ## Next Steps
 
-- Integrate evaluation modules for generation quality, using manually annotated answers or LLM-as-a-judge methods to assess correctness, completeness, relevance, and clarity.
-- Adopt RAG evaluation frameworks like RAGAs to assess answer-evidence consistency (faithfulness, relevancy, precision, recall) and improve generation quality.
-- Add automatic query routing and query-type detection so the system can choose `top_k`, `reasoning_effort`, `rerank`, and related retrieval-generation parameters automatically for each question.
+- **Add a generation quality evaluation module:** Use manually annotated answers or LLM-as-a-judge to further assess the correctness, completeness, relevance, and clarity of generated answers.
+- **Introduce RAG evaluation frameworks:** Adopt frameworks like RAGAs to evaluate answer-evidence consistency (faithfulness, answer relevancy, context precision, context recall) and further optimize generation performance.
+- **Refine context assembly (local):** Implement a strategy to expand the local neighborhood of high-relevance chunks by supplementing them with adjacent text, charts from the same page, and related captions/footnotes to improve evidence completeness.
+- **Refine context assembly (filtering):** Enhance filtering strategies to reduce interference from similar but irrelevant noise across different documents.
+- **Implement automatic query routing:** Automatically analyze question types to select optimal retrieval and generation parameters (e.g., `top_k`, `reasoning_effort`, `rerank`).
 
 ## References and Dependencies
 
-This project is built on the following open-source frameworks and components:
+This project is built upon the following open-source frameworks and modules:
 
-- [cross-encoder/ms-marco-MiniLM-L-6-v2](https://huggingface.co/cross-encoder/ms-marco-MiniLM-L-6-v2): default reranker model
-- [Docker](https://www.docker.com/): used to run local `ollama` containers and related services
-- [FAISS](https://github.com/facebookresearch/faiss): used for vector indexing and similarity search
-- [FastAPI](https://fastapi.tiangolo.com/): used to build the HTTP API
-- [MinerU](https://github.com/opendatalab/MinerU): used for structured parsing of academic paper PDFs and figure asset export
-- [OpenAI SDK](https://platform.openai.com/docs/overview): used for model API integration and multimodal / text generation calls
-- [Ollama](https://ollama.com/): optional local generation backend
-- [rank_bm25](https://github.com/dorianbrown/rank_bm25): used for sparse retrieval and keyword matching
-- [sentence-transformers/all-MiniLM-L6-v2](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2): default embedding model
-- [Typer](https://typer.tiangolo.com/): used to build the CLI
-- [Uvicorn](https://www.uvicorn.org/): used to run the HTTP service
-- [uv](https://docs.astral.sh/uv/): used for Python dependency management and command execution
-- [WattBot 25](https://www.kaggle.com/competitions/WattBot2025/overview): source of the paper list and benchmark dataset in the example data
+- [cross-encoder/ms-marco-MiniLM-L-6-v2](https://huggingface.co/cross-encoder/ms-marco-MiniLM-L-6-v2): Default reranker model.
+- [Docker](https://www.docker.com/): Manages local `ollama` containers and related services.
+- [FAISS](https://github.com/facebookresearch/faiss): Vector indexing and similarity search.
+- [FastAPI](https://fastapi.tiangolo.com/): HTTP API framework.
+- [MinerU](https://github.com/opendatalab/MinerU): Structured PDF parsing and image asset export.
+- [OpenAI SDK](https://platform.openai.com/docs/overview): Model API access and multimodal/text generation.
+- [Ollama](https://ollama.com/): Optional local generation backend.
+- [rank_bm25](https://github.com/dorianbrown/rank_bm25): Sparse retrieval and keyword matching.
+- [sentence-transformers/all-MiniLM-L6-v2](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2): Default embedding model.
+- [Typer](https://typer.tiangolo.com/): CLI builder.
+- [Uvicorn](https://www.uvicorn.org/): HTTP service runner.
+- [uv](https://docs.astral.sh/uv/): Python dependency management and command execution.
+- [WattBot 25](https://www.kaggle.com/competitions/WattBot2025/overview): Source of the paper list and benchmark dataset in the example data.
 
 ## License
-
-This project is released under the **AGPL-3.0** license, aligning with the licensing requirements of dependencies (MinerU). This license does not apply to the papers and benchmark datasets in the example data, which remain subject to their original data license **CC BY-NC 4.0**.
+This project is released under the **AGPL-3.0** license, consistent with its dependencies (MinerU). This license does not apply to the papers and benchmark datasets in the example data, which remain subject to their original license, **CC BY-NC 4.0**.
