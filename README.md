@@ -18,6 +18,8 @@ LumiCite is an end-to-end, multimodal RAG system designed for academic research.
 - **Switchable LLM Backend:** Supports standard LLM APIs and can switch to a containerized `ollama` local backend to adapt to restricted deployment environments such as offline or internal networks.
 - **Multi-Input Source Support:** Supports three input sources: `local_dir`, `url_csv`, and `url_list`, adapting to different scenarios for local PDF ingestion and batch URL import.
 
+*Planned Feature: Introduce an Agentic Router Layer with LangGraph for query-aware policy selection, controlled retry, and adaptive retrieval/generation parameter tuning.
+
 ## System Architecture Overview
 
 ```text
@@ -434,13 +436,12 @@ A benchmark dataset `data/benchmark_QA.csv`, constructed from these sample paper
 
 The sample data is adapted from publicly available datasets and is intended solely for non-commercial research and evaluation purposes within this project. The underlying data remains subject to its original license.
 
-## Next Steps
+## Future Steps
 
 - **Add a generation quality evaluation module:** Use manually annotated answers or LLM-as-a-judge to further assess the correctness, completeness, relevance, and clarity of generated answers.
 - **Introduce RAG evaluation frameworks:** Adopt frameworks like RAGAs to evaluate answer-evidence consistency (faithfulness, answer relevancy, context precision, context recall) and further optimize generation performance.
 - **Refine context assembly (local):** Implement a strategy to expand the local neighborhood of high-relevance chunks by supplementing them with adjacent text, charts from the same page, and related captions/footnotes to improve evidence completeness.
 - **Refine context assembly (filtering):** Enhance filtering strategies to reduce interference from similar but irrelevant noise across different documents.
-- **Implement automatic query routing:** Automatically analyze question types to select optimal retrieval and generation parameters (e.g., `top_k`, `reasoning_effort`, `rerank`).
 
 ## References and Dependencies
 
@@ -462,3 +463,85 @@ This project is built upon the following open-source frameworks and modules:
 
 ## License
 This project is released under the **AGPL-3.0** license, consistent with its dependencies (MinerU). This license does not apply to the papers and benchmark datasets in the example data, which remain subject to their original license, **CC BY-NC 4.0**.
+
+
+## Agentic Router Layer (Planned Feature)
+
+To better adapt retrieval and generation strategies to different academic question patterns, the system plans to introduce a **Router / Policy Layer** before the current Retrieval Layer and Generation Layer.
+
+### Background and Objective
+
+Evaluation experiments showed that different academic domains and question types are sensitive to different prompts and parameter settings across the retrieval and recall pipeline. A single default configuration cannot reliably balance answer quality and system performance across all scenarios.
+
+The current system already supports multiple retrieval, recall, and generation parameters, but these still need to be adjusted and tested manually by the user, which introduces additional usage overhead and trial-and-error cost.
+
+To address this, we plans to introduce an Agentic router layer using LangGraph. At the beginning of each query, the layer will use an LLM to perform preliminary query analysis and assessment, dynamically select the most suitable retrieval path, and evaluate intermediate results for controlled retry when necessary. The goal is to further improve Accuracy and Recall while reducing user-side tuning cost and increasing overall adaptability.
+
+### Functional Scope
+
+The Router Layer is responsible for the following tasks:
+
+- Analyze the current query and identify its question pattern, such as definition, comparison, quantitative, causal, multi-hop, or figure/table-dependent questions
+- Infer the approximate academic domain or subtopic of the query, in order to account for domain-specific terminology and evidence distribution
+- Decide whether query explanation is needed and select an appropriate explanation prompt strategy
+- Dynamically select the retrieval policy, including retrieval mode, top_k, fetch_k, and whether reranking should be enabled
+- Dynamically select the generation policy, including prompt variant, reasoning_effort, and whether stricter citation or fallback behavior is needed
+- Trigger a limited strategy switch or controlled retry when the initial retrieval result is clearly insufficient
+
+The Router Layer only outputs policy decisions. The actual retrieval, reranking, and answer synthesis remain handled by the existing modules.
+
+### Node Definition
+
+The Router Layer can be abstracted into the following core nodes:
+
+**1. Query Analysis**
+Performs structured analysis of the original query and outputs labels such as question type, academic domain, estimated complexity, and whether the question likely depends on tables, figures, or cross-document evidence.
+
+**2. Policy Selection**
+Maps the analysis result to a concrete execution strategy, including:
+
+- whether query explanation should be enabled
+- which explanation prompt variant should be used
+- retrieval mode
+- top_k / fetch_k
+- whether reranking should be enabled
+- generation prompt variant
+- reasoning_effort
+- whether additional verification or a more conservative fallback policy is required
+
+**3. Retrieval Execution**
+Invokes the existing retrieval pipeline to perform explanation, recall, fusion, and reranking under the selected policy.
+
+**4. Result Assessment**
+Performs lightweight quality checks on the retrieval result, such as relevance scores, evidence coverage, figure/table hit rate, or concentration of high-confidence results, in order to determine whether the current result set is sufficient.
+
+**5. Retry / Fallback**
+If the result is inadequate, the system may perform one controlled strategy switch, such as changing the explanation prompt, increasing top_k, or enabling reranking. If evidence remains insufficient, the system falls back to the existing conservative fallback path instead of retrying indefinitely.
+
+### Decision Flow
+
+The typical execution flow of the Router Layer is:
+
+**original query → Query Analysis → Policy Selection → Retrieval Execution → Result Assessment → generation / limited retry / fallback**
+
+In practice:
+
+- simple and well-matched queries can directly use a lightweight policy to reduce latency
+- complex queries with implicit conditions or multimodal evidence requirements can use a stronger explanation and retrieval configuration
+- if the first retrieval result is weak, the system can switch strategy once within a controlled range instead of relying on a single fixed parameter set
+- if sufficient evidence still cannot be obtained, the system preserves the current conservative answering behavior and returns fallback rather than forcing an unsupported answer
+
+### Relationship to the Existing Architecture
+
+The Router Layer is an additional upper-level control module and does not replace the current Ingestion, Indexing, Retrieval, or Generation components. The following parts of the system can remain unchanged:
+
+- PDF parsing and multimodal normalization
+- TextChunk / FigureChunk / TableChunk schema
+- embedding generation and index construction
+- dense / sparse / hybrid retrieval
+- RRF fusion and cross-encoder reranking
+- answer synthesis, citation enrichment, and fallback
+
+With the new layer, the overall architecture becomes:
+
+**Source Layer → Ingestion Layer → Indexing Layer → Router / Policy Layer → Retrieval Layer → Generation Layer → Interface Layer**

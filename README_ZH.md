@@ -18,6 +18,8 @@ LumiCite 是一个针对学术科研场景的端到端、多模态 RAG 系统，
 - **可切换 LLM 后端：** 支持标准化 LLM API，并可切换为容器化 `ollama` 本地推理后端，以适配离线内网等受限部署场景
 - **多输入源支持：** 支持 `local_dir`、`url_csv`、`url_list` 三类输入源，适配本地 PDF 文档与 URL 批量导入的不同场景
 
+*待实现功能：引入基于 LangGraph 的 Agentic Router Layer，支持面向 query 的自适应策略选择、受控重试与检索/生成参数自适应调整。
+
 ## 系统架构概览
 
 ```text
@@ -436,13 +438,12 @@ uv run rag benchmark --dataset data/benchmark_QA.csv --tag smoke
 示例数据基于公开发布的数据集适配，仅用于本项目的非商业研究与评测用途，对应数据仍受其原始数据许可证约束
 
 
-## 下一步方向
+## 未来方向
 
 - 增加面向生成质量的评估模块，基于人工标注答案或使用 LLM-as-a-judge 进一步评估生成回答的 correctness、completeness、relevance 与 clarity
 - 引入 RAGAs 等 RAG 评估框架， faithfulness、answer relevancy、context precision、context recall 等维度评估答案与证据的一致性，并进一步优化生成效果
 - 在检索与生成之间增加更精细的 context assembly 策略，在保留高相关 chunk 的基础上，引入同文档局部邻域扩展，补充相邻正文、同页图表及相关 caption/footnote，提升证据完整性，减少“主证据命中但补充证据缺失”的情况
 - 在检索与生成之间增加更精细的 context assembly 与 context filtering 策略，补充同文档局部邻域证据，减少跨文档相似噪声对生成结果的干扰
-- 加入对 query 的自动识别与分流，根据问题类型自动选择 `top_k`、`reasoning_effort`、`rerank` 等检索与生成参数
 
 ## 引用与依赖
 
@@ -464,3 +465,85 @@ uv run rag benchmark --dataset data/benchmark_QA.csv --tag smoke
 
 ## 许可证说明
 本项目采用 **AGPL-3.0** 协议发布，与项目中使用的相关依赖模块（MinerU）保持一致性；不适用于示例数据中的论文与评测数据集，相关数据仍遵循原始数据许可证 **CC BY-NC 4.0**
+
+
+## 待实现功能：Agentic Router Layer
+
+为支持不同学术问题在检索与生成策略上的差异，计划在现有 Retrieval Layer 与 Generation Layer 之前增加一层 **Router / Policy Layer**。这一层不改变底层解析、索引、检索与生成模块的实现，只负责在查询时做结构化判断与参数决策，并将决策结果传递给现有流程执行。
+
+### 背景与目标
+
+在评估实验中发现，不同学术领域及问题类型对检索、召回流程中的不同 Prompt、参数敏感度差异较大，使用同一套默认参数难以平衡不同场景下的准确率与系统性能。
+
+当前系统已支持多种召回、检索、生成参数的调整，但仍需用户手动调整、测试，带来一定使用门槛及试错成本。
+
+为此，计划使用 LangGraph 为当前系统加入一层 Agentic router layer，在查询开始阶段，通过 LLM 对用户 Query 进行预分析/评估，动态选择最合适的检索路径，并对中间结果进行评估及重试。进一步提升 Accuracy、Recall，同时降低使用成本、提升整体适配性。
+
+### 功能定义
+
+Router 层主要负责以下任务：
+
+- 分析当前 query 的问题类型，例如定义型、比较型、定量型、因果型、多跳推理型、图表依赖型等
+- 识别 query 所属的大致学术领域或子主题，用于区分不同领域的表达习惯与证据分布
+- 判断是否需要启用 query explanation，以及选择哪一类 explanation prompt
+- 动态决定 retrieval policy，包括 retrieval mode、top_k、fetch_k、是否启用 rerank 等参数组合
+- 动态决定 generation policy，包括 prompt variant、reasoning_effort、是否启用更严格的 citation / fallback 策略
+- 在检索效果明显不足时，触发一次有限的策略切换或补充重试
+
+Router 层只输出策略，不直接实现底层检索与生成逻辑。检索、rerank、answer synthesis 仍由现有模块执行。
+
+### 节点定义
+
+Router 层可抽象为以下几个核心节点：
+
+**1. Query Analysis**
+对原始问题进行结构化分析，输出问题类型、领域判断、预估复杂度、是否依赖图表或多文档证据等标签。
+
+**2. Policy Selection**
+根据分析结果生成本轮查询策略，包括：
+
+- 是否启用 query explanation
+- explanation prompt 类型
+- retrieval mode
+- top_k / fetch_k
+- 是否启用 rerank
+- generation prompt variant
+- reasoning_effort
+- 是否需要额外校验或更保守 fallback
+
+**3. Retrieval Execution**
+调用现有 retrieval pipeline，执行 explanation、召回、融合、rerank 等步骤。
+
+**4. Result Assessment**
+根据召回结果的质量进行评估，例如相关性分数、证据覆盖度、图表命中情况、结果集中度等，用于判断是否接受当前结果。
+
+**5. Retry / Fallback**
+当结果明显不足时，允许在受控范围内切换一次策略，例如更换 explanation prompt、提高 top_k、启用 rerank，或直接进入保守 fallback 路径，避免无约束重试。
+
+### 决策流
+
+Router 层的典型执行流程如下：
+
+**原始 query → Query Analysis → Policy Selection → Retrieval Execution → Result Assessment → 进入生成 / 触发有限重试 / fallback**
+
+其中：
+
+- 若问题较简单且匹配明确，可直接走轻量策略，减少额外延迟
+- 若问题较复杂、隐含条件较多或依赖图表证据，可启用更强的 explanation 与 retrieval 配置
+- 若首次召回质量不足，可在受控范围内切换一次策略，而不是始终使用固定参数
+- 若多次尝试后仍缺乏充分证据，则维持现有保守回答原则，优先返回 fallback，避免强行作答
+
+### 与现有架构的关系
+
+Router 层属于新增的上层控制模块，不替代现有 Ingestion、Indexing、Retrieval、Generation 组件。现有系统中的以下部分可继续保持不变：
+
+- PDF parsing 与 multimodal normalization
+- TextChunk / FigureChunk / TableChunk schema
+- embedding 与索引构建
+- dense / sparse / hybrid retrieval
+- RRF fusion 与 cross-encoder reranking
+- answer synthesis、citation enrichment 与 fallback
+
+新增后的整体结构可表示为：
+
+**Source Layer → Ingestion Layer → Indexing Layer → Router / Policy Layer → Retrieval Layer → Generation Layer → Interface Layer**
