@@ -1,10 +1,11 @@
 [🇺🇸 English](./README.md) | [🇨🇳 简体中文](./README_ZH.md)
 
+# LumiCite
+
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue)](./pyproject.toml)
 [![License](https://img.shields.io/badge/License-AGPL--3.0-green)](./LICENSE)
 [![CI](https://github.com/cany7/LumiCite/actions/workflows/ci.yml/badge.svg)](https://github.com/cany7/LumiCite/actions/workflows/ci.yml)
-
-# LumiCite
+[![FastAPI](https://img.shields.io/badge/FastAPI-005571?style=flat&logo=fastapi)](https://fastapi.tiangolo.com)
 
 LumiCite is an end-to-end, multimodal RAG system designed for academic research. It unifies **main text, images, and tables** from academic papers into a searchable corpus, combining **hybrid retrieval, reranking, and citation-aware answering** to provide accurate evidence retrieval, high recall, and reliable answer generation for academic applications.
 
@@ -71,13 +72,13 @@ At the same time, when the system could not accurately answer these complex ques
 
 We compared retrieval performance with Query Explanation enabled (default baseline) versus disabled to evaluate the system's overall retrieval, recall latency, and performance:
 
-| Metric | Query Explanation **ON** (Default) | Query Explanation **OFF** | Change |
-| :--- | :--- | :--- | :--- |
-| **Recall@10** | 0.8780 | 0.8780 | = 0% |
-| **MRR** | 0.8171 | 0.7642 | ▼ 6.5% |
-| **NDCG@10** | 0.8321 | 0.7933 | ▼ 4.7% |
-| **Mean Latency** | 994.64 ms | 65.28 ms | ▼ 93% |
-| **P95 Latency** | 1667.82 ms | 39.07 ms | ▼ 97% |
+| Metric           | Query Explanation **ON** (Default) | Query Explanation **OFF** | Change |
+|:-----------------|:-----------------------------------|:--------------------------|:-------|
+| **Recall@10**    | 0.8780                             | 0.8780                    | = 0%   |
+| **MRR**          | 0.8171                             | 0.7642                    | ▼ 6.5% |
+| **NDCG@10**      | 0.8321                             | 0.7933                    | ▼ 4.7% |
+| **Mean Latency** | 994.64 ms                          | 65.28 ms                  | ▼ 93%  |
+| **P95 Latency**  | 1667.82 ms                         | 39.07 ms                  | ▼ 97%  |
 
 **Analysis Conclusion**:
 
@@ -475,7 +476,7 @@ Evaluation experiments showed that different academic domains and question types
 
 The current system already supports multiple retrieval, recall, and generation parameters, but these still need to be adjusted and tested manually by the user, which introduces additional usage overhead and trial-and-error cost.
 
-To address this, we plans to introduce an Agentic router layer using LangGraph. At the beginning of each query, the layer will use an LLM to perform preliminary query analysis and assessment, dynamically select the most suitable retrieval path, and evaluate intermediate results for controlled retry when necessary. The goal is to further improve Accuracy and Recall while reducing user-side tuning cost and increasing overall adaptability.
+To address this, we plan to introduce an Agentic router layer using LangGraph. At the beginning of each query, the layer will use an LLM to perform preliminary query analysis and assessment, dynamically select the most suitable retrieval path, and evaluate intermediate results for controlled retry when necessary. The goal is to further improve Accuracy and Recall while reducing user-side tuning cost and increasing overall adaptability.
 
 ### Functional Scope
 

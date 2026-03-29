@@ -1,10 +1,11 @@
 [🇺🇸 English](./README.md) | [🇨🇳 简体中文](./README_ZH.md)
 
+# LumiCite
+
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue)](./pyproject.toml)
 [![License](https://img.shields.io/badge/License-AGPL--3.0-green)](./LICENSE)
 [![CI](https://github.com/cany7/LumiCite/actions/workflows/ci.yml/badge.svg)](https://github.com/cany7/LumiCite/actions/workflows/ci.yml)
-
-# LumiCite
+[![FastAPI](https://img.shields.io/badge/FastAPI-005571?style=flat&logo=fastapi)](https://fastapi.tiangolo.com)
 
 LumiCite 是一个针对学术科研场景的端到端、多模态 RAG 系统，通过将学术论文中的**正文、图像与表格**统一解析为可检索语料，结合 **hybrid retrieval、reranking 与 citation-aware answering**，为学术应用提供精准的证据检索、召回与答案生成
 
@@ -71,13 +72,13 @@ Interface Layer
 
 对比了开启（默认基准）与关闭 Query Explanation 两种模式下的检索性能表现，以评估系统整体检索、召回延迟与性能表现：
 
-| Metric | Query Explanation **ON** (Default) | Query Explanation **OFF** | Change |
-| :--- | :--- | :--- | :--- |
-| **Recall@10** | 0.8780 | 0.8780 | = 0% |
-| **MRR** | 0.8171 | 0.7642 | ▼ 6.5% |
-| **NDCG@10** | 0.8321 | 0.7933 | ▼ 4.7% |
-| **Mean Latency** | 994.64 ms | 65.28 ms | ▼ 93% |
-| **P95 Latency** | 1667.82 ms | 39.07 ms | ▼ 97% |
+| Metric           | Query Explanation **ON** (Default) | Query Explanation **OFF** | Change |
+|:-----------------|:-----------------------------------|:--------------------------|:-------|
+| **Recall@10**    | 0.8780                             | 0.8780                    | = 0%   |
+| **MRR**          | 0.8171                             | 0.7642                    | ▼ 6.5% |
+| **NDCG@10**      | 0.8321                             | 0.7933                    | ▼ 4.7% |
+| **Mean Latency** | 994.64 ms                          | 65.28 ms                  | ▼ 93%  |
+| **P95 Latency**  | 1667.82 ms                         | 39.07 ms                  | ▼ 97%  |
 
 **分析结论**：
 
